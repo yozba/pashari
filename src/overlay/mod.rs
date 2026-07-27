@@ -251,9 +251,34 @@ fn containing_monitor(monitors: &[Rect], sel: Rect, canvas: Rect) -> Rect {
         .unwrap_or(canvas)
 }
 
+/// One monitor as reported by the windowing system: absolute position and
+/// size (both physical pixels) plus its own DPI scale factor.
+type MonitorInfo = ((i32, i32), (u32, u32), f64);
+
+/// Pairs each monitor rect (src coordinates; `origin` is where `(0,0)`
+/// sits in virtual-desktop coordinates) with a scale factor, by finding
+/// the `handles` entry covering that rect's center. Falls back to 1.0 for
+/// anything unmatched (an OS-independent pure function).
+fn match_monitor_dpis(origin: (i32, i32), monitors: &[Rect], handles: &[MonitorInfo]) -> Vec<f64> {
+    monitors
+        .iter()
+        .map(|m| {
+            let cx = origin.0 + m.x0 as i32 + (m.x1 - m.x0) as i32 / 2;
+            let cy = origin.1 + m.y0 as i32 + (m.y1 - m.y0) as i32 / 2;
+            handles
+                .iter()
+                .find(|&&((hx, hy), (hw, hh), _)| {
+                    cx >= hx && cx < hx + hw as i32 && cy >= hy && cy < hy + hh as i32
+                })
+                .map(|&(.., scale)| scale)
+                .unwrap_or(1.0)
+        })
+        .collect()
+}
+
 impl Frozen {
     /// Captures all monitors and composites them into one virtual-desktop-wide image.
-    fn capture() -> Result<Self, Box<dyn std::error::Error>> {
+    fn capture(event_loop: &ActiveEventLoop) -> Result<Self, Box<dyn std::error::Error>> {
         use xcap::Monitor;
 
         let monitors = Monitor::all()?;
@@ -261,7 +286,19 @@ impl Frozen {
             .iter()
             .map(|m| (m.x(), m.y(), m.width(), m.height()))
             .collect();
-        let monitor_dpis: Vec<f64> = monitors.iter().map(|m| m.scale_factor() as f64).collect();
+        // Scale factors come from winit, not xcap: xcap derives its own
+        // from a device context's logical-vs-physical width ratio, which
+        // is always 1 in a DPI-aware process like this one (nothing is
+        // virtualized for it), whereas winit reports each monitor's real
+        // per-monitor DPI.
+        let handles: Vec<MonitorInfo> = event_loop
+            .available_monitors()
+            .map(|m| {
+                let p = m.position();
+                let s = m.size();
+                ((p.x, p.y), (s.width, s.height), m.scale_factor())
+            })
+            .collect();
         let (min_x, min_y, max_x, max_y) =
             monitors_bounds(&rects).ok_or("モニタが見つかりません")?;
         let width = (max_x - min_x).max(1) as usize;
@@ -275,6 +312,7 @@ impl Frozen {
                 y1: (((y - min_y) as i64 + h as i64).clamp(0, height as i64)) as usize,
             })
             .collect();
+        let monitor_dpis = match_monitor_dpis((min_x, min_y), &monitor_rects, &handles);
 
         let mut bright = vec![0u32; width * height];
         let mut dim = vec![0u32; width * height];
@@ -2167,7 +2205,7 @@ fn next_fps(current: u32, presets: &[u32]) -> u32 {
 impl Overlay {
     /// Captures the freeze image and starts an overlay session (called by App on a hotkey).
     pub(crate) fn start(event_loop: &ActiveEventLoop) -> Result<Self, Box<dyn std::error::Error>> {
-        let frozen = Frozen::capture()?;
+        let frozen = Frozen::capture(event_loop)?;
         // Enumerates top-level windows for auto region snapping before
         // creating the overlay window, so it doesn't include itself as a candidate.
         let snapshot = snap::Snapshot::capture(frozen.origin, (frozen.width, frozen.height));
@@ -2701,6 +2739,49 @@ mod tests {
             y1: 100,
         };
         assert_eq!(containing_monitor(&[], sel, canvas), canvas);
+    }
+
+    #[test]
+    fn match_monitor_dpis_pairs_each_monitor_with_its_own_scale_factor() {
+        // A 100% primary at (-1920,0) and a 150% secondary at (0,0), so
+        // the composited origin is negative (like a left-of-primary layout).
+        let origin = (-1920, 0);
+        let monitors = [
+            Rect {
+                x0: 0,
+                y0: 0,
+                x1: 1920,
+                y1: 1080,
+            },
+            Rect {
+                x0: 1920,
+                y0: 0,
+                x1: 1920 + 2560,
+                y1: 1440,
+            },
+        ];
+        let handles = [
+            ((-1920, 0), (1920u32, 1080u32), 1.0),
+            ((0, 0), (2560u32, 1440u32), 1.5),
+        ];
+        assert_eq!(
+            match_monitor_dpis(origin, &monitors, &handles),
+            vec![1.0, 1.5]
+        );
+    }
+
+    #[test]
+    fn match_monitor_dpis_falls_back_to_1_when_no_handle_covers_the_monitor() {
+        let monitors = [Rect {
+            x0: 0,
+            y0: 0,
+            x1: 1920,
+            y1: 1080,
+        }];
+        // A handle that sits somewhere else entirely.
+        let handles = [((5000, 5000), (800u32, 600u32), 2.0)];
+        assert_eq!(match_monitor_dpis((0, 0), &monitors, &handles), vec![1.0]);
+        assert_eq!(match_monitor_dpis((0, 0), &monitors, &[]), vec![1.0]);
     }
 
     /// A minimal `Overlay` for tests (no real capture/window). Just one `w x h` monitor.
