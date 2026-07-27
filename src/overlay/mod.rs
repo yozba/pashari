@@ -193,6 +193,13 @@ struct Frozen {
     /// monitor, so button placement clamps against this instead — the
     /// range actually showing a screen.
     monitors: Vec<Rect>,
+    /// Each monitor's own DPI scale factor, same order/index as
+    /// `monitors`. A multi-monitor setup can mix DPIs, and this window
+    /// spans every monitor at once, so there's no single "the window's
+    /// scale factor" that's correct everywhere — anything sized by DPI
+    /// (currently just the post-selection action menu) has to look up the
+    /// specific monitor a selection is on.
+    monitor_dpis: Vec<f64>,
 }
 
 /// Computes the bounding rect `(min_x, min_y, max_x, max_y)` containing
@@ -212,23 +219,35 @@ fn monitors_bounds(rects: &[(i32, i32, u32, u32)]) -> Option<(i32, i32, i32, i32
         })
 }
 
-/// Returns the monitor rect that actually shows rect `sel` (`monitors` in
-/// src coordinates). If `sel` isn't fully contained by any one monitor
-/// (e.g. a selection spanning multiple monitors), falls back to whichever
-/// monitor overlaps it most. Falls back to the whole composited canvas
-/// (`canvas`) if there are no monitors (an OS-independent pure function).
-fn containing_monitor(monitors: &[Rect], sel: Rect, canvas: Rect) -> Rect {
+/// Index of the monitor that actually shows rect `sel` (`monitors` in src
+/// coordinates). If `sel` isn't fully contained by any one monitor (e.g. a
+/// selection spanning multiple monitors), falls back to whichever monitor
+/// overlaps it most. `None` if there are no monitors (an OS-independent
+/// pure function; shared by `containing_monitor` and the per-monitor DPI
+/// lookup, so both agree on which monitor a selection belongs to).
+fn containing_monitor_index(monitors: &[Rect], sel: Rect) -> Option<usize> {
     monitors
         .iter()
-        .find(|m| m.x0 <= sel.x0 && m.y0 <= sel.y0 && m.x1 >= sel.x1 && m.y1 >= sel.y1)
+        .position(|m| m.x0 <= sel.x0 && m.y0 <= sel.y0 && m.x1 >= sel.x1 && m.y1 >= sel.y1)
         .or_else(|| {
-            monitors.iter().max_by_key(|m| {
-                let iw = m.x1.min(sel.x1).saturating_sub(m.x0.max(sel.x0));
-                let ih = m.y1.min(sel.y1).saturating_sub(m.y0.max(sel.y0));
-                iw * ih
-            })
+            monitors
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, m)| {
+                    let iw = m.x1.min(sel.x1).saturating_sub(m.x0.max(sel.x0));
+                    let ih = m.y1.min(sel.y1).saturating_sub(m.y0.max(sel.y0));
+                    iw * ih
+                })
+                .map(|(i, _)| i)
         })
-        .copied()
+}
+
+/// Returns the monitor rect that actually shows rect `sel` (`monitors` in
+/// src coordinates). Falls back to the whole composited canvas (`canvas`)
+/// if there are no monitors (an OS-independent pure function).
+fn containing_monitor(monitors: &[Rect], sel: Rect, canvas: Rect) -> Rect {
+    containing_monitor_index(monitors, sel)
+        .map(|i| monitors[i])
         .unwrap_or(canvas)
 }
 
@@ -242,6 +261,7 @@ impl Frozen {
             .iter()
             .map(|m| (m.x(), m.y(), m.width(), m.height()))
             .collect();
+        let monitor_dpis: Vec<f64> = monitors.iter().map(|m| m.scale_factor() as f64).collect();
         let (min_x, min_y, max_x, max_y) =
             monitors_bounds(&rects).ok_or("モニタが見つかりません")?;
         let width = (max_x - min_x).max(1) as usize;
@@ -299,6 +319,7 @@ impl Frozen {
             dim,
             origin: (min_x, min_y),
             monitors: monitor_rects,
+            monitor_dpis,
         })
     }
 }
@@ -380,13 +401,6 @@ pub struct Overlay {
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     /// The surface's (window's) current size.
     surface_size: (usize, usize),
-    /// The window's DPI scale factor (`window.scale_factor()`). Everything
-    /// else in this window (selection rect, handles, magnifier, crosshair)
-    /// stays in real physical screen pixels, since it has to line up
-    /// exactly with the actual capture region — only the post-selection
-    /// action menu's button size (see `build_menu`/`menu::Menu::layout`)
-    /// uses this, so its buttons/labels don't look undersized at DPI>100%.
-    dpi: f64,
     /// The real cursor's current position (screen coordinates).
     cursor: PhysicalPosition<f64>,
     /// The src coordinate directly under the cursor. Coincides with the
@@ -526,7 +540,6 @@ impl Overlay {
             context: None,
             surface: None,
             surface_size: (0, 0),
-            dpi: 1.0,
             cursor: PhysicalPosition::new(0.0, 0.0),
             cursor_src: (0.0, 0.0),
             drag_start_src: None,
@@ -676,7 +689,15 @@ impl Overlay {
         let uploaders_configured = !crate::store::enabled_uploaders().is_empty();
         self.menu = self.selection.map(|sel| {
             let bounds = containing_monitor(&self.frozen.monitors, sel, canvas);
-            menu::Menu::layout(sel, bounds, &self.keys.menu, uploaders_configured, self.dpi)
+            // Looked up per-monitor (not a single window-wide DPI): this
+            // window spans every monitor at once, and a multi-monitor
+            // setup can mix DPIs, so the menu has to scale to whichever
+            // monitor the selection actually landed on.
+            let dpi = containing_monitor_index(&self.frozen.monitors, sel)
+                .and_then(|i| self.frozen.monitor_dpis.get(i))
+                .copied()
+                .unwrap_or(1.0);
+            menu::Menu::layout(sel, bounds, &self.keys.menu, uploaders_configured, dpi)
         });
     }
 
@@ -2245,7 +2266,6 @@ impl Overlay {
             .expect("surface resize");
 
         self.surface_size = (sw as usize, sh as usize);
-        self.dpi = window.scale_factor();
         self.window = Some(window);
         self.context = Some(context);
         self.surface = Some(surface);
@@ -2697,6 +2717,7 @@ mod tests {
                 x1: w,
                 y1: h,
             }],
+            monitor_dpis: vec![1.0],
         };
         let mut overlay = Overlay::new(frozen);
         overlay.surface_size = (w, h);
