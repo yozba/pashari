@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
     DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
 };
@@ -434,7 +434,15 @@ pub struct Overlay {
     control_window: Option<Rc<Window>>,
     control_context: Option<softbuffer::Context<Rc<Window>>>,
     control_surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    /// The control bar's logical (DPI-independent) size, used for layout
+    /// and hit-testing — see `control_dpi`.
     control_size: (usize, usize),
+    /// The control bar window/surface's actual physical pixel size.
+    control_physical_size: (usize, usize),
+    /// The control bar window's DPI scale factor (`window.scale_factor()`),
+    /// read once at creation (this window is short-lived, so unlike
+    /// Settings/Editor it doesn't react to `ScaleFactorChanged`).
+    control_dpi: f64,
     /// The button the cursor is over on the control bar.
     control_hover: Option<CtrlBtn>,
     /// Output format (toggle, default MP4).
@@ -539,6 +547,8 @@ impl Overlay {
             control_context: None,
             control_surface: None,
             control_size: (0, 0),
+            control_physical_size: (0, 0),
+            control_dpi: 1.0,
             control_hover: None,
             record_format,
             fps: cfg.record_fps.max(1),
@@ -1112,7 +1122,7 @@ impl Overlay {
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
             .with_position(PhysicalPosition::new(x as i32 + ox, y as i32 + oy))
-            .with_inner_size(PhysicalSize::new(CONTROL_W as u32, CONTROL_H as u32))
+            .with_inner_size(LogicalSize::new(CONTROL_W as f64, CONTROL_H as f64))
             // Created hidden so the animation-disable flag can be set before it's shown.
             .with_visible(false)
             .with_skip_taskbar(true);
@@ -1134,7 +1144,12 @@ impl Overlay {
             .resize(NonZeroU32::new(cw).unwrap(), NonZeroU32::new(ch).unwrap())
             .expect("control resize");
 
-        self.control_size = (cw as usize, ch as usize);
+        self.control_dpi = window.scale_factor();
+        self.control_physical_size = (cw as usize, ch as usize);
+        self.control_size = (
+            ((cw as f64) / self.control_dpi).round().max(1.0) as usize,
+            ((ch as f64) / self.control_dpi).round().max(1.0) as usize,
+        );
         window.request_redraw();
         self.control_window = Some(window);
         self.control_context = Some(context);
@@ -1316,11 +1331,12 @@ impl Overlay {
         buf.fill(0x001E_1E1E);
 
         {
+            let (pw, ph) = self.control_physical_size;
             let mut canvas = Canvas {
                 buf: &mut buf[..],
-                w: sw,
-                h: sh,
-                scale: 1.0,
+                w: pw,
+                h: ph,
+                scale: self.control_dpi,
             };
             for (btn, rect) in &buttons {
                 let (base, label, enabled): (u32, String, bool) = match btn {
@@ -1423,7 +1439,11 @@ impl Overlay {
                     let (cw, ch) = (size.width.max(1), size.height.max(1));
                     let _ =
                         surface.resize(NonZeroU32::new(cw).unwrap(), NonZeroU32::new(ch).unwrap());
-                    self.control_size = (cw as usize, ch as usize);
+                    self.control_physical_size = (cw as usize, ch as usize);
+                    self.control_size = (
+                        ((cw as f64) / self.control_dpi).round().max(1.0) as usize,
+                        ((ch as f64) / self.control_dpi).round().max(1.0) as usize,
+                    );
                 }
                 if let Some(w) = self.control_window.as_ref() {
                     w.request_redraw();
@@ -1505,7 +1525,9 @@ impl Overlay {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                let hit = self.control_hit(position.x as usize, position.y as usize);
+                let x = position.x / self.control_dpi;
+                let y = position.y / self.control_dpi;
+                let hit = self.control_hit(x as usize, y as usize);
                 if hit != self.control_hover {
                     self.control_hover = hit;
                     if let Some(w) = self.control_window.as_ref() {
