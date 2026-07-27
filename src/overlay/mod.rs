@@ -380,6 +380,13 @@ pub struct Overlay {
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     /// The surface's (window's) current size.
     surface_size: (usize, usize),
+    /// The window's DPI scale factor (`window.scale_factor()`). Everything
+    /// else in this window (selection rect, handles, magnifier, crosshair)
+    /// stays in real physical screen pixels, since it has to line up
+    /// exactly with the actual capture region — only the post-selection
+    /// action menu's button size (see `build_menu`/`menu::Menu::layout`)
+    /// uses this, so its buttons/labels don't look undersized at DPI>100%.
+    dpi: f64,
     /// The real cursor's current position (screen coordinates).
     cursor: PhysicalPosition<f64>,
     /// The src coordinate directly under the cursor. Coincides with the
@@ -519,6 +526,7 @@ impl Overlay {
             context: None,
             surface: None,
             surface_size: (0, 0),
+            dpi: 1.0,
             cursor: PhysicalPosition::new(0.0, 0.0),
             cursor_src: (0.0, 0.0),
             drag_start_src: None,
@@ -668,7 +676,7 @@ impl Overlay {
         let uploaders_configured = !crate::store::enabled_uploaders().is_empty();
         self.menu = self.selection.map(|sel| {
             let bounds = containing_monitor(&self.frozen.monitors, sel, canvas);
-            menu::Menu::layout(sel, bounds, &self.keys.menu, uploaders_configured)
+            menu::Menu::layout(sel, bounds, &self.keys.menu, uploaders_configured, self.dpi)
         });
     }
 
@@ -2237,6 +2245,7 @@ impl Overlay {
             .expect("surface resize");
 
         self.surface_size = (sw as usize, sh as usize);
+        self.dpi = window.scale_factor();
         self.window = Some(window);
         self.context = Some(context);
         self.surface = Some(surface);

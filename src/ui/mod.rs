@@ -337,8 +337,11 @@ pub fn draw_icon_button(
 
     // The label (uppercase, centered in the bottom 45%). Font size
     // tracks the button size (measured: at a 56px button, the longest
-    // label "DESKTOP" fits in a 46.4px width at 15px).
-    let label_font = (h * 0.27).clamp(11.0, 15.0);
+    // label "DESKTOP" fits in a 46.4px width at 15px) — no upper clamp,
+    // so a caller drawing intentionally larger buttons (e.g. DPI-scaled)
+    // gets proportionally larger, still-fitting text rather than a
+    // fixed-size label that looks undersized inside a bigger button.
+    let label_font = (h * 0.27).max(11.0);
     let label = label.to_uppercase();
     let tw = text.text_width(&label, label_font);
     let lx = rect.x0 as f32 + (w - tw) / 2.0;

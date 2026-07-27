@@ -65,12 +65,25 @@ impl Menu {
     /// place it somewhere belonging to no monitor. Disables the Upload
     /// button if `uploaders_configured` is false, so pressing it with no
     /// uploader configured doesn't just silently do nothing.
+    ///
+    /// `dpi` scales the button/gap size (`ACTION_BTN`/`MARGIN`) directly,
+    /// unlike the rest of this window's drawing — everything else here
+    /// (`sel`/`bounds`) is real physical screen coordinates that must stay
+    /// exact, but the menu itself isn't tied to a specific pixel position,
+    /// so growing it at high DPI is just a sizing choice. Since the
+    /// resulting `Button::rect`s are used for both drawing and hit-testing
+    /// (`hit`), scaling them here keeps the two consistent without
+    /// touching the window's shared `Canvas`.
     pub(super) fn layout(
         sel: Rect,
         bounds: Rect,
         keys: &MenuKeys,
         uploaders_configured: bool,
+        dpi: f64,
     ) -> Self {
+        let action_btn = ((ACTION_BTN as f64) * dpi).round() as usize;
+        let margin = ((MARGIN as f64) * dpi).round() as usize;
+
         // (Action, label, keys, gap from the previous button). All gaps
         // are currently 0 (packed together); to space out a specific
         // button later, just change its value here.
@@ -83,8 +96,8 @@ impl Menu {
             (Action::Quit, "Quit", keys.quit.clone(), 0),
         ];
         let total_gap: usize = specs.iter().map(|(.., g)| g).sum();
-        let panel_w = ACTION_BTN * N + total_gap;
-        let panel_h = ACTION_BTN;
+        let panel_w = action_btn * N + total_gap;
+        let panel_h = action_btn;
 
         // Horizontal position: aligned to the selection's left edge, clamped within bounds.
         let px = sel
@@ -92,11 +105,11 @@ impl Menu {
             .max(bounds.x0)
             .min(bounds.x1.saturating_sub(panel_w).max(bounds.x0));
         // Vertical position: below the selection first, else above, else clamped to bounds' bottom edge.
-        let below = sel.y1 + MARGIN;
+        let below = sel.y1 + margin;
         let py = if below + panel_h <= bounds.y1 {
             below
-        } else if sel.y0 >= bounds.y0 + panel_h + MARGIN {
-            sel.y0 - panel_h - MARGIN
+        } else if sel.y0 >= bounds.y0 + panel_h + margin {
+            sel.y0 - panel_h - margin
         } else {
             bounds.y1.saturating_sub(panel_h).max(bounds.y0)
         };
@@ -124,15 +137,15 @@ impl Menu {
                 rect: Rect {
                     x0: bx,
                     y0: py,
-                    x1: bx + ACTION_BTN,
-                    y1: py + ACTION_BTN,
+                    x1: bx + action_btn,
+                    y1: py + action_btn,
                 },
                 disabled: matches!(action, Action::Upload) && !uploaders_configured,
                 action,
                 label,
                 hotkeys,
             };
-            bx += ACTION_BTN;
+            bx += action_btn;
         }
 
         Self { buttons }
@@ -207,7 +220,7 @@ mod tests {
 
     #[test]
     fn menu_sits_below_selection_when_space_allows() {
-        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), true);
+        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), true, 1.0);
         // Placed below the selection (y1=200 plus margin).
         assert!(m.buttons[0].rect.y0 >= 200);
         assert_eq!(m.buttons.len(), 6);
@@ -233,7 +246,13 @@ mod tests {
     #[test]
     fn menu_flips_above_when_no_space_below() {
         // The selection touches the bottom edge -> no room below, so it flips above.
-        let m = Menu::layout(sel(100, 1000, 300, 1080), full_hd(), &test_keys(), true);
+        let m = Menu::layout(
+            sel(100, 1000, 300, 1080),
+            full_hd(),
+            &test_keys(),
+            true,
+            1.0,
+        );
         assert!(m.buttons[0].rect.y1 <= 1000);
     }
 
@@ -249,7 +268,7 @@ mod tests {
             x1: 3840,
             y1: 1000,
         };
-        let m = Menu::layout(sel(3700, 900, 3800, 990), bounds, &test_keys(), true);
+        let m = Menu::layout(sel(3700, 900, 3800, 990), bounds, &test_keys(), true, 1.0);
         for b in &m.buttons {
             assert!(b.rect.x0 >= bounds.x0 && b.rect.x1 <= bounds.x1);
             assert!(b.rect.y0 >= bounds.y0 && b.rect.y1 <= bounds.y1);
@@ -258,7 +277,7 @@ mod tests {
 
     #[test]
     fn hit_returns_button_index_or_none() {
-        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), true);
+        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), true, 1.0);
         let b0 = m.buttons[0].rect;
         // The button's center hits.
         let cx = (b0.x0 + b0.x1) / 2;
@@ -270,7 +289,7 @@ mod tests {
 
     #[test]
     fn upload_button_is_disabled_without_configured_uploaders_but_still_absorbs_clicks() {
-        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), false);
+        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), false, 1.0);
         assert!(m.buttons[3].disabled);
         let b3 = m.buttons[3].rect;
         let cx = (b3.x0 + b3.x1) / 2;
