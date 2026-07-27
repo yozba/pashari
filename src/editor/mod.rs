@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
@@ -359,7 +359,18 @@ pub struct Editor {
     window: Option<Rc<Window>>,
     _context: Option<softbuffer::Context<Rc<Window>>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    /// The window's logical (DPI-independent) size, used for all layout,
+    /// hit-testing, and the image zoom/pan math below — see `dpi`.
     surface_size: (usize, usize),
+    /// The window/surface's actual physical pixel size.
+    physical_size: (usize, usize),
+    /// The window's DPI scale factor (`window.scale_factor()`), used to
+    /// convert between logical (`surface_size`) and physical
+    /// (`physical_size`) — see the module doc in `src/settings/mod.rs` for
+    /// the general approach this mirrors. Named `dpi` (not `scale`) to
+    /// avoid colliding with the image zoom/pan `scale` below, a separate,
+    /// user-controlled concept that operates entirely in logical pixels.
+    dpi: f64,
 
     /// Display scale (zoom) and the world origin's offset within the
     /// window. `f64` since zoom/pan can go negative.
@@ -529,7 +540,7 @@ impl Editor {
     /// Editor entry; an image item can be added later via clipboard paste
     /// or file drag-and-drop). If `Session`, restores the item set from a
     /// saved session as-is.
-    fn new(event_loop: &ActiveEventLoop, init: EditorInit, monitor: (usize, usize)) -> Self {
+    fn new(event_loop: &ActiveEventLoop, init: EditorInit, monitor: (usize, usize, f64)) -> Self {
         let keys = EditorKeys::from_config(&crate::store::hotkeys::snapshot());
 
         let (img_size, annotations) = match init {
@@ -556,6 +567,17 @@ impl Editor {
                 annotations,
             } => (Some((width, height)), annotations),
         };
+
+        // `monitor` is physical; convert to logical up front so every
+        // constant below (TOOLBAR_W/H, MIN_W/H, ...) can keep meaning a
+        // fixed logical-pixel count, same as every other window in this
+        // codebase — the window itself is created with a logical size
+        // below, and the final on-screen `Canvas` (in `draw()`) is what
+        // converts back to physical for DPI-crisp rendering.
+        let monitor = (
+            ((monitor.0 as f64) / monitor.2).round() as usize,
+            ((monitor.1 as f64) / monitor.2).round() as usize,
+        );
 
         // A horizontal bar on top, a vertical bar on the left; the image
         // sits inside them (bottom-right). Uses the default size if blank.
@@ -587,10 +609,10 @@ impl Editor {
         let attrs = Window::default_attributes()
             .with_title("pashari Editor")
             .with_resizable(true)
-            .with_min_inner_size(PhysicalSize::new(MIN_W as u32, MIN_H as u32))
+            .with_min_inner_size(LogicalSize::new(MIN_W as f64, MIN_H as f64))
             .with_window_level(WindowLevel::Normal)
-            .with_position(PhysicalPosition::new(pos_x, pos_y))
-            .with_inner_size(PhysicalSize::new(win_w as u32, win_h as u32));
+            .with_position(LogicalPosition::new(pos_x as f64, pos_y as f64))
+            .with_inner_size(LogicalSize::new(win_w as f64, win_h as f64));
         let window = Rc::new(
             event_loop
                 .create_window(attrs)
@@ -601,11 +623,17 @@ impl Editor {
         let mut surface =
             softbuffer::Surface::new(&context, window.clone()).expect("editor surface");
         let size = window.inner_size();
-        let (sw, sh) = (size.width.max(1), size.height.max(1));
+        let (pw, ph) = (size.width.max(1), size.height.max(1));
         surface
-            .resize(NonZeroU32::new(sw).unwrap(), NonZeroU32::new(sh).unwrap())
+            .resize(NonZeroU32::new(pw).unwrap(), NonZeroU32::new(ph).unwrap())
             .expect("editor resize");
         window.request_redraw();
+
+        let dpi = window.scale_factor();
+        let surface_size = (
+            ((pw as f64) / dpi).round().max(1.0) as usize,
+            ((ph as f64) / dpi).round().max(1.0) as usize,
+        );
 
         // If markers already exist (e.g. restored from a session), continue numbering from there.
         let next_marker_num = next_marker_number(&annotations);
@@ -614,7 +642,9 @@ impl Editor {
             window: Some(window),
             _context: Some(context),
             surface: Some(surface),
-            surface_size: (sw as usize, sh as usize),
+            surface_size,
+            physical_size: (pw as usize, ph as usize),
+            dpi,
             scale,
             offset,
             home_scale: scale,
@@ -1064,11 +1094,20 @@ impl Editor {
 
             WindowEvent::Resized(size) => {
                 if let Some(surface) = self.surface.as_mut() {
-                    let (sw, sh) = (size.width.max(1), size.height.max(1));
+                    let (pw, ph) = (size.width.max(1), size.height.max(1));
                     let _ =
-                        surface.resize(NonZeroU32::new(sw).unwrap(), NonZeroU32::new(sh).unwrap());
-                    self.surface_size = (sw as usize, sh as usize);
+                        surface.resize(NonZeroU32::new(pw).unwrap(), NonZeroU32::new(ph).unwrap());
+                    self.physical_size = (pw as usize, ph as usize);
+                    self.surface_size = (
+                        ((pw as f64) / self.dpi).round().max(1.0) as usize,
+                        ((ph as f64) / self.dpi).round().max(1.0) as usize,
+                    );
                 }
+                self.request_redraw();
+            }
+
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.dpi = scale_factor;
                 self.request_redraw();
             }
 
@@ -1121,19 +1160,24 @@ impl Editor {
             },
 
             WindowEvent::CursorMoved { position, .. } => {
+                // `position` is always physical; the rest of this module
+                // (including the image zoom/pan math) works in logical
+                // coordinates (see the `dpi` field doc), so convert once here.
+                let x = position.x / self.dpi;
+                let y = position.y / self.dpi;
                 // While panning, shift the camera by the cursor's movement.
                 if let Some((lx, ly)) = self.pan {
-                    self.offset.0 += position.x - lx;
-                    self.offset.1 += position.y - ly;
-                    self.pan = Some((position.x, position.y));
-                    self.cursor = (position.x, position.y);
+                    self.offset.0 += x - lx;
+                    self.offset.1 += y - ly;
+                    self.pan = Some((x, y));
+                    self.cursor = (x, y);
                     self.request_redraw();
                     return false;
                 }
-                self.cursor = (position.x, position.y);
+                self.cursor = (x, y);
                 if self.picker_drag.is_some() {
                     // Follow the color picker drag.
-                    self.apply_picker(position.x, position.y);
+                    self.apply_picker(x, y);
                 } else if !matches!(self.edit, EditDrag::None) {
                     // Follow the item while moving/resizing.
                     self.apply_edit();
@@ -1141,7 +1185,7 @@ impl Editor {
                 } else {
                     if self.dragging && self.tool == Tool::Draw {
                         // During a freehand drag: accumulate stroke points, thinning as it goes.
-                        let p = self.to_world(position.x, position.y);
+                        let p = self.to_world(x, y);
                         let should_push = match self.freehand_pts.last() {
                             Some(&last) => should_sample_freehand_point(last, p),
                             None => true,
@@ -1150,7 +1194,7 @@ impl Editor {
                             self.freehand_pts.push(p);
                         }
                     }
-                    let h = self.button_at(position.x as usize, position.y as usize);
+                    let h = self.button_at(x as usize, y as usize);
                     if h != self.hover {
                         self.hover = h;
                         self.request_redraw();
@@ -2845,6 +2889,7 @@ impl Editor {
 
     fn draw(&mut self) {
         let (sw, sh) = self.surface_size;
+        let (pw, ph) = self.physical_size;
         if sw == 0 || sh == 0 {
             return;
         }
@@ -2997,18 +3042,25 @@ impl Editor {
         // Xform match the current frame; if not (window resize, or rarely
         // a wheel zoom mid-drag), this simply falls back to full
         // rendering and rebuilds it below.
+        // Keyed on the physical buffer size (not the logical `surface_size`)
+        // since `c.buf` below is a verbatim copy of the physical-sized
+        // `canvas.buf` — the two must always agree or `copy_from_slice`
+        // (used when reusing the cache) would panic on a length mismatch.
         let use_cache = tool == Tool::Draw
             && dragging
             && matches!(
                 &self.freehand_bg_cache,
-                Some(c) if c.w == sw && c.h == sh && c.scale == scale && c.ox == ox && c.oy == oy
+                Some(c) if c.w == pw && c.h == ph && c.scale == scale && c.ox == ox && c.oy == oy
             );
 
         if !use_cache {
-            // Lays down the low-contrast checkerboard marking transparency (items like the screenshot sit on top).
-            for y in 0..sh {
-                let row = y * sw;
-                for x in 0..sw {
+            // Lays down the low-contrast checkerboard marking transparency
+            // (items like the screenshot sit on top). Uses the physical
+            // buffer size directly (a purely decorative tiling pattern, so
+            // there's no need to route it through `Canvas`'s DPI scaling).
+            for y in 0..ph {
+                let row = y * pw;
+                for x in 0..pw {
                     buf[row + x] = if (x / CHECK_SIZE + y / CHECK_SIZE) & 1 == 0 {
                         CHECK_A
                     } else {
@@ -3021,9 +3073,9 @@ impl Editor {
         {
             let mut canvas = Canvas {
                 buf: &mut buf[..],
-                w: sw,
-                h: sh,
-                scale: 1.0,
+                w: pw,
+                h: ph,
+                scale: self.dpi,
             };
 
             let t = Xform { scale, ox, oy };
@@ -3047,8 +3099,8 @@ impl Editor {
                     // Caches only the committed state, excluding the
                     // stroke currently being drawn.
                     self.freehand_bg_cache = Some(FreehandBgCache {
-                        w: sw,
-                        h: sh,
+                        w: pw,
+                        h: ph,
                         scale,
                         ox,
                         oy,
@@ -3523,9 +3575,9 @@ impl ApplicationHandler for EditorApp {
             .primary_monitor()
             .map(|m| {
                 let s = m.size();
-                (s.width as usize, s.height as usize)
+                (s.width as usize, s.height as usize, m.scale_factor())
             })
-            .unwrap_or((1920, 1080));
+            .unwrap_or((1920, 1080, 1.0));
         self.editor = Some(Editor::new(event_loop, init, monitor));
     }
 
