@@ -1320,6 +1320,7 @@ impl Overlay {
                 buf: &mut buf[..],
                 w: sw,
                 h: sh,
+                scale: 1.0,
             };
             for (btn, rect) in &buttons {
                 let (base, label, enabled): (u32, String, bool) = match btn {
@@ -1682,6 +1683,7 @@ impl Overlay {
                 buf: &mut buf[..],
                 w: sw,
                 h: sh,
+                scale: 1.0,
             };
 
             if let Some(r) = rect_src {

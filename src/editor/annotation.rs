@@ -1003,6 +1003,7 @@ fn paint_text_rotated(
             buf: &mut color_buf,
             w: bw,
             h: bh,
+            scale: 1.0,
         };
         tr.draw(&mut tmp, 1.0, baseline, s, screen_size, color);
     }
@@ -1012,6 +1013,7 @@ fn paint_text_rotated(
             buf: &mut mask_buf,
             w: bw,
             h: bh,
+            scale: 1.0,
         };
         tr.draw(&mut tmp, 1.0, baseline, s, screen_size, color);
     }
@@ -1228,6 +1230,7 @@ pub(super) fn rasterize_freehand(points: &[(i64, i64)], thick: i64, color: u32) 
             buf: &mut buf,
             w,
             h,
+            scale: 1.0,
         };
         draw_polyline(&mut tmp, &local, thick, 0x00FF_FFFF);
     }
@@ -3447,6 +3450,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &ann, &t, None, false);
         }
@@ -3483,6 +3487,7 @@ mod tests {
                 buf: &mut buf,
                 w,
                 h,
+                scale: 1.0,
             };
             fill_rotated_rect(&mut canvas, 20.0, 20.0, 8.0, 5.0, 0.0, FG);
         }
@@ -3505,6 +3510,7 @@ mod tests {
                 buf: &mut buf,
                 w,
                 h,
+                scale: 1.0,
             };
             fill_rotated_ellipse(&mut canvas, 20.0, 20.0, 8.0, 5.0, 0.0, FG);
         }
@@ -3538,6 +3544,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &filled, &t, None, false);
         }
@@ -3560,6 +3567,7 @@ mod tests {
                 buf: &mut buf2,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &unfilled, &t, None, false);
         }
@@ -3592,6 +3600,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &filled, &t, None, false);
         }
@@ -3614,6 +3623,7 @@ mod tests {
                 buf: &mut buf2,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &unfilled, &t, None, false);
         }
@@ -3933,6 +3943,7 @@ mod tests {
                 buf: &mut buf,
                 w: SRC_W,
                 h: 1,
+                scale: 1.0,
             };
             let t = Xform {
                 scale: 1.0,
@@ -3968,6 +3979,7 @@ mod tests {
                 buf: &mut buf,
                 w: 4,
                 h: 4,
+                scale: 1.0,
             };
             let t = Xform {
                 scale: 100_000.0,
@@ -3991,6 +4003,7 @@ mod tests {
                 buf: &mut buf,
                 w: 4,
                 h: 4,
+                scale: 1.0,
             };
             let t = Xform {
                 scale: 1.0,
@@ -4029,6 +4042,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             let t = Xform {
                 scale: 1.0,
@@ -4068,6 +4082,7 @@ mod tests {
                 buf: &mut buf,
                 w: 3,
                 h: 1,
+                scale: 1.0,
             };
             let t = Xform {
                 scale: 1.0,
@@ -4123,6 +4138,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             // Rect: (10,10)-(30,30), center (20,20). With block=100, the
             // bottom-right quadrant [20,30)x[20,30) falls within local
@@ -4181,6 +4197,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_mosaic(
                 &mut canvas,
@@ -4238,6 +4255,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_mosaic(
                 &mut canvas,
@@ -4290,6 +4308,7 @@ mod tests {
                 buf: &mut buf1,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_mosaic(
                 &mut canvas,
@@ -4306,6 +4325,7 @@ mod tests {
                 buf: &mut buf2,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_mosaic(
                 &mut canvas,
@@ -4338,6 +4358,7 @@ mod tests {
                 buf: &mut buf1,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_mosaic(
                 &mut canvas,
@@ -4354,6 +4375,7 @@ mod tests {
                 buf: &mut buf2,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_mosaic(
                 &mut canvas,
@@ -4387,6 +4409,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &ann, &t, None, false);
         }
@@ -4401,6 +4424,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &ann, &t, None, true);
         }
@@ -4424,6 +4448,7 @@ mod tests {
                 buf: &mut buf,
                 w: 10,
                 h: 10,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &ann, &t, None, false);
         }
@@ -4458,6 +4483,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &ann, &t, None, false);
         }
@@ -4484,6 +4510,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_one(&mut canvas, &ann, &t, None, false);
         }
@@ -4526,6 +4553,7 @@ mod tests {
                 buf: &mut buf,
                 w: 40,
                 h: 40,
+                scale: 1.0,
             };
             paint_annotations(&mut canvas, &[guide, rect], &t, None, None, false);
         }
@@ -4549,6 +4577,7 @@ mod tests {
                 buf: &mut buf,
                 w: 4,
                 h: 4,
+                scale: 1.0,
             };
             dim_outside_guide(&mut canvas, Some((1, 1, 3, 3)), &t);
         }
@@ -4573,6 +4602,7 @@ mod tests {
                 buf: &mut buf,
                 w: 4,
                 h: 4,
+                scale: 1.0,
             };
             dim_outside_guide(&mut canvas, None, &t);
         }

@@ -1247,11 +1247,29 @@ pub(super) fn draw_video(
         let (popup, sv_rect, hue_rect) = click_color_picker_geom(sw, text, target);
         canvas.fill(popup, PICK_BG);
         canvas.stroke(popup, 0x0080_8080);
-        for yy in 0..PICK_SV {
-            let vv = 1.0 - yy as f32 / PICK_SV as f32;
-            for xx in 0..PICK_SV {
-                let ss = xx as f32 / PICK_SV as f32;
-                canvas.set(sv_rect.x0 + xx, sv_rect.y0 + yy, hsv_to_rgb(h, ss, vv));
+
+        // These per-pixel gradients bypass `Canvas`'s auto-scaling shape
+        // methods, so scale `sv_rect`/`hue_rect` to physical pixels here
+        // (matching `Canvas::fill`/`stroke`'s own rounding) and resample
+        // the gradient once per physical pixel — sharper at high DPI
+        // rather than nearest-neighbor blocky.
+        let scaled = |r: Rect| {
+            let s = |v: usize| ((v as f64) * canvas.scale).round() as usize;
+            Rect {
+                x0: s(r.x0),
+                y0: s(r.y0),
+                x1: s(r.x1),
+                y1: s(r.y1),
+            }
+        };
+        let sv_p = scaled(sv_rect);
+        let hue_p = scaled(hue_rect);
+
+        for yy in 0..sv_p.height() {
+            let vv = 1.0 - yy as f32 / sv_p.height().max(1) as f32;
+            for xx in 0..sv_p.width() {
+                let ss = xx as f32 / sv_p.width().max(1) as f32;
+                canvas.set(sv_p.x0 + xx, sv_p.y0 + yy, hsv_to_rgb(h, ss, vv));
             }
         }
         marker(
@@ -1259,16 +1277,16 @@ pub(super) fn draw_video(
             sv_rect.x0 as i64 + (s * PICK_SV as f32) as i64,
             sv_rect.y0 as i64 + ((1.0 - v) * PICK_SV as f32) as i64,
         );
-        for xx in 0..PICK_SV {
-            let col = hsv_to_rgb(xx as f32 / PICK_SV as f32 * 360.0, 1.0, 1.0);
-            for yy in 0..PICK_HUE_H {
-                canvas.set(hue_rect.x0 + xx, hue_rect.y0 + yy, col);
+        for xx in 0..hue_p.width() {
+            let col = hsv_to_rgb(xx as f32 / hue_p.width().max(1) as f32 * 360.0, 1.0, 1.0);
+            for yy in 0..hue_p.height() {
+                canvas.set(hue_p.x0 + xx, hue_p.y0 + yy, col);
             }
         }
-        let hx = hue_rect.x0 as i64 + (h / 360.0 * PICK_SV as f32) as i64;
-        for yy in 0..PICK_HUE_H as i64 {
-            canvas.set_i(hx, hue_rect.y0 as i64 + yy, 0x00FF_FFFF);
-            canvas.set_i(hx - 1, hue_rect.y0 as i64 + yy, 0x0000_0000);
+        let hx = hue_p.x0 as i64 + (h / 360.0 * hue_p.width() as f32) as i64;
+        for yy in 0..hue_p.height() as i64 {
+            canvas.set_i(hx, hue_p.y0 as i64 + yy, 0x00FF_FFFF);
+            canvas.set_i(hx - 1, hue_p.y0 as i64 + yy, 0x0000_0000);
         }
     }
 }

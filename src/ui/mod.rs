@@ -52,9 +52,30 @@ pub struct Canvas<'a> {
     pub buf: &'a mut [u32],
     pub w: usize,
     pub h: usize,
+    /// Physical-per-logical-pixel ratio applied by the shape-drawing
+    /// methods below (`fill`/`stroke`/`line`*/`fill_circle`*/`blit_scaled`*)
+    /// to their own geometric inputs, once, before doing their normal
+    /// per-physical-pixel work — so callers can keep passing the same
+    /// fixed logical-pixel layout values regardless of the window's DPI.
+    /// `1.0` (the default for every caller except the Settings window) is
+    /// an exact identity transform. `set`/`set_i`/`blend_i` are the raw
+    /// per-physical-pixel primitives and are deliberately NOT scaled here
+    /// (the methods above already convert to physical coordinates before
+    /// calling them — scaling twice would leave gaps).
+    pub scale: f64,
 }
 
 impl Canvas<'_> {
+    fn scaled_rect(&self, r: Rect) -> Rect {
+        let s = |v: usize| ((v as f64) * self.scale).round() as usize;
+        Rect {
+            x0: s(r.x0),
+            y0: s(r.y0),
+            x1: s(r.x1),
+            y1: s(r.y1),
+        }
+    }
+
     pub fn set(&mut self, x: usize, y: usize, color: u32) {
         if x < self.w && y < self.h {
             self.buf[y * self.w + x] = color;
@@ -85,6 +106,7 @@ impl Canvas<'_> {
 
     /// Fills the inside of a rect.
     pub fn fill(&mut self, r: Rect, color: u32) {
+        let r = self.scaled_rect(r);
         for y in r.y0..r.y1.min(self.h) {
             let row = y * self.w;
             for x in r.x0..r.x1.min(self.w) {
@@ -95,6 +117,7 @@ impl Canvas<'_> {
 
     /// Draws a rect's 1px outline.
     pub fn stroke(&mut self, r: Rect, color: u32) {
+        let r = self.scaled_rect(r);
         for x in r.x0..r.x1 {
             self.set(x, r.y0, color);
             if r.y1 > 0 {
@@ -145,6 +168,10 @@ impl Canvas<'_> {
         color: u32,
         clip: Option<Rect>,
     ) {
+        let s = |v: i64| ((v as f64) * self.scale).round() as i64;
+        let (x0, y0, x1, y1) = (s(x0), s(y0), s(x1), s(y1));
+        let thickness = (((thickness as f64) * self.scale).round() as i64).max(1);
+        let clip = clip.map(|c| self.scaled_rect(c));
         let half = (thickness.max(1) as f64) / 2.0;
         let (fx0, fy0, fx1, fy1) = (x0 as f64, y0 as f64, x1 as f64, y1 as f64);
         let (dx, dy) = (fx1 - fx0, fy1 - fy0);
@@ -219,6 +246,8 @@ impl Canvas<'_> {
     }
 
     fn fill_circle_f_impl(&mut self, cx: f64, cy: f64, r: f64, color: u32, clip: Option<Rect>) {
+        let (cx, cy, r) = (cx * self.scale, cy * self.scale, r * self.scale);
+        let clip = clip.map(|c| self.scaled_rect(c));
         let margin = 1;
         let mut x0 = (cx - r).floor() as i64 - margin;
         let mut x1 = (cx + r).ceil() as i64 + margin;
@@ -244,6 +273,7 @@ impl Canvas<'_> {
     /// Scales `src` (`src_w x src_h`, packed pixels) to fit rect `dst`
     /// via nearest-neighbor sampling (for simple blits like thumbnails).
     pub fn blit_scaled(&mut self, dst: Rect, src_w: usize, src_h: usize, src: &[u32]) {
+        let dst = self.scaled_rect(dst);
         if src_w == 0 || src_h == 0 || dst.width() == 0 || dst.height() == 0 {
             return;
         }
@@ -261,6 +291,7 @@ impl Canvas<'_> {
     /// (used to draw an icon image with a transparent background over a
     /// button's background).
     pub fn blit_scaled_alpha(&mut self, dst: Rect, src_w: usize, src_h: usize, src: &[u32]) {
+        let dst = self.scaled_rect(dst);
         if src_w == 0 || src_h == 0 || dst.width() == 0 || dst.height() == 0 {
             return;
         }
@@ -504,11 +535,15 @@ pub fn rgb_to_hsv(c: u32) -> (f32, f32, f32) {
 
 /// The color picker's current-value marker (a hollow white square).
 pub fn marker(canvas: &mut Canvas, cx: i64, cy: i64) {
-    for d in -4..=4 {
-        canvas.set_i(cx + d, cy - 4, 0x00FF_FFFF);
-        canvas.set_i(cx + d, cy + 4, 0x00FF_FFFF);
-        canvas.set_i(cx - 4, cy + d, 0x00FF_FFFF);
-        canvas.set_i(cx + 4, cy + d, 0x00FF_FFFF);
+    let s = canvas.scale;
+    let cx = ((cx as f64) * s).round() as i64;
+    let cy = ((cy as f64) * s).round() as i64;
+    let half = ((4.0 * s).round() as i64).max(1);
+    for d in -half..=half {
+        canvas.set_i(cx + d, cy - half, 0x00FF_FFFF);
+        canvas.set_i(cx + d, cy + half, 0x00FF_FFFF);
+        canvas.set_i(cx - half, cy + d, 0x00FF_FFFF);
+        canvas.set_i(cx + half, cy + d, 0x00FF_FFFF);
     }
 }
 
@@ -526,6 +561,7 @@ mod tests {
             buf: &mut buf,
             w: 1,
             h: 1,
+            scale: 1.0,
         };
         canvas.blend_i(0, 0, FG, 0.0);
         assert_eq!(canvas.buf[0], BG, "カバレッジ0なら変化しない");
@@ -549,6 +585,7 @@ mod tests {
                 buf: &mut buf,
                 w,
                 h,
+                scale: 1.0,
             };
             canvas.fill_circle(10, 10, 5, FG);
         }
@@ -571,6 +608,7 @@ mod tests {
                 buf: &mut buf,
                 w,
                 h,
+                scale: 1.0,
             };
             canvas.fill_circle_f(10.0, 10.0, 1.5, FG);
         }
@@ -594,6 +632,7 @@ mod tests {
                 buf: &mut buf,
                 w,
                 h,
+                scale: 1.0,
             };
             let clip = Rect {
                 x0: 0,
@@ -617,6 +656,7 @@ mod tests {
                 buf: &mut buf,
                 w,
                 h,
+                scale: 1.0,
             };
             canvas.line(5, 10, 15, 10, 4, FG); // thickness=4 -> half-thickness 2.0
         }
@@ -671,6 +711,7 @@ mod tests {
                 buf: &mut buf,
                 w,
                 h,
+                scale: 1.0,
             };
             let dst = Rect {
                 x0: 1,
@@ -700,6 +741,7 @@ mod tests {
                 buf: &mut buf,
                 w,
                 h,
+                scale: 1.0,
             };
             let dst = Rect {
                 x0: 0,

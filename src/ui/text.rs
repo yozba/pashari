@@ -153,6 +153,25 @@ impl TextRenderer {
         color: u32,
         clip: Option<Rect>,
     ) {
+        // `x`/`baseline`/`size` (and `clip`) are logical-pixel values, same
+        // as every other caller-facing coordinate in this codebase; scale
+        // them to the canvas's physical resolution once here so glyphs are
+        // rasterized crisply at any DPI instead of being nearest-neighbor
+        // magnified after the fact.
+        let dpi = canvas.scale as f32;
+        let x = x * dpi;
+        let baseline = baseline * dpi;
+        let size = size * dpi;
+        let clip = clip.map(|c| {
+            let s = |v: usize| ((v as f64) * canvas.scale).round() as usize;
+            Rect {
+                x0: s(c.x0),
+                y0: s(c.y0),
+                x1: s(c.x1),
+                y1: s(c.y1),
+            }
+        });
+
         let (sw, sh) = (canvas.w, canvas.h);
         let scale = PxScale::from(size);
         let fr = ((color >> 16) & 0xff) as f32;

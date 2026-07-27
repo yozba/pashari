@@ -2801,6 +2801,7 @@ impl Editor {
                 buf: &mut color,
                 w,
                 h,
+                scale: 1.0,
             };
             paint_annotations(&mut canvas, &self.annotations, t, text, None, true);
         }
@@ -2812,6 +2813,7 @@ impl Editor {
                 buf: &mut mask,
                 w,
                 h,
+                scale: 1.0,
             };
             paint_annotations(&mut canvas, &self.annotations, t, text, None, true);
         }
@@ -3021,6 +3023,7 @@ impl Editor {
                 buf: &mut buf[..],
                 w: sw,
                 h: sh,
+                scale: 1.0,
             };
 
             let t = Xform { scale, ox, oy };

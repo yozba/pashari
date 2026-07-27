@@ -9,13 +9,20 @@
 //! has many rows.
 //!
 //! Every layout constant across this module and its per-tab submodules is
-//! a fixed pixel count, unscaled by the monitor's DPI. Rather than
-//! threading a scale factor through all of them, `draw()` renders the
-//! whole frame at that fixed logical size as always, then upscales it to
-//! the window's actual physical size in one pass (see `physical_size`/
-//! `scale`) — otherwise, since winit makes this a per-monitor-DPI-aware
-//! process, the window would stay pixel-for-pixel identical at any DPI
-//! and look shrunk relative to the rest of a scaled-up desktop.
+//! a fixed logical-pixel count, unscaled by the monitor's DPI — otherwise,
+//! since winit makes this a per-monitor-DPI-aware process, the window
+//! would stay pixel-for-pixel identical at any DPI and look shrunk
+//! relative to the rest of a scaled-up desktop. Rather than threading a
+//! scale factor through all of them, `draw()` builds one `Canvas` wrapping
+//! the window's real physical-pixel surface directly (see
+//! `physical_size`/`scale`), and `Canvas`'s own shape-drawing methods
+//! (`fill`/`line`/`fill_circle`/`blit_scaled`/... — see `src/ui/mod.rs`)
+//! scale each shape's logical coordinates to physical ones before drawing
+//! it, so every existing call site in this module and its submodules
+//! keeps passing the same fixed logical values unchanged. Text goes
+//! through the same scaling inside `TextRenderer::draw` (`src/ui/text.rs`)
+//! — since it rasterizes an actual vector font, this keeps glyphs crisp at
+//! any DPI rather than nearest-neighbor magnified.
 
 mod capture_tab;
 mod editor_tab;
@@ -1375,18 +1382,20 @@ impl Settings {
             return;
         };
 
-        // Draw the whole frame at the fixed logical size (all layout
-        // constants across this module and the per-tab submodules are
-        // unscaled pixel counts) into an intermediate buffer, then upscale
-        // it into the real, physical-sized surface buffer below — see the
-        // module doc for why.
-        let mut frame = vec![0u32; sw * sh];
+        // Every layout constant across this module and the per-tab
+        // submodules is a fixed logical-pixel count, unaffected by DPI —
+        // `Canvas`'s own drawing methods scale each shape's coordinates by
+        // `self.scale` before touching the (physical-sized) surface
+        // buffer, so this call site itself needs no scaling logic at all.
+        // See the module doc for why.
+        let (pw, ph) = self.physical_size;
 
         {
             let mut canvas = Canvas {
-                buf: &mut frame[..],
-                w: sw,
-                h: sh,
+                buf: &mut buf[..],
+                w: pw,
+                h: ph,
+                scale: self.scale,
             };
             canvas.fill(
                 Rect {
@@ -1634,23 +1643,6 @@ impl Settings {
             }
         }
 
-        let (pw, ph) = self.physical_size;
-        let mut out = Canvas {
-            buf: &mut buf[..],
-            w: pw,
-            h: ph,
-        };
-        out.blit_scaled(
-            Rect {
-                x0: 0,
-                y0: 0,
-                x1: pw,
-                y1: ph,
-            },
-            sw,
-            sh,
-            &frame,
-        );
         let _ = buf.present();
     }
 }
@@ -1753,6 +1745,16 @@ fn stroke_top_bottom_aware(
     draw_bottom: bool,
     color: u32,
 ) {
+    // Bypasses `Canvas::stroke` (to support the draw_top/draw_bottom
+    // split), so it has to scale `r` to physical pixels itself, the same
+    // way `Canvas`'s own shape-drawing methods do.
+    let s = |v: usize| ((v as f64) * canvas.scale).round() as usize;
+    let r = Rect {
+        x0: s(r.x0),
+        y0: s(r.y0),
+        x1: s(r.x1),
+        y1: s(r.y1),
+    };
     if draw_top {
         for x in r.x0..r.x1 {
             canvas.set(x, r.y0, color);
