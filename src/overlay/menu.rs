@@ -26,6 +26,9 @@ pub(super) struct MenuKeys {
 const N: usize = 6;
 /// Gap between the selection outline and the menu.
 const MARGIN: usize = 10;
+/// Height of the size-label row above the buttons.
+const LABEL_H: usize = 22;
+const LABEL_FONT: f32 = 12.0;
 
 const BTN_BG: u32 = 0x0033_3333;
 const BTN_HOVER: u32 = 0x0045_4545;
@@ -49,11 +52,16 @@ pub struct Button {
     pub disabled: bool,
 }
 
-/// A menu with a fixed `N` buttons. No frame is drawn around them (each
-/// button stands alone), so the exposed state is just the button list.
+/// A menu with a fixed `N` buttons, plus a label row above them showing
+/// the selection's pixel size. No frame is drawn around the buttons (each
+/// stands alone).
 #[derive(Clone)]
 pub struct Menu {
     pub buttons: [Button; N],
+    /// The selection's size as "W x H", precomputed so `draw` doesn't
+    /// need the selection rect too.
+    pub size_label: String,
+    pub label_rect: Rect,
 }
 
 impl Menu {
@@ -83,6 +91,7 @@ impl Menu {
     ) -> Self {
         let action_btn = ((ACTION_BTN as f64) * dpi).round() as usize;
         let margin = ((MARGIN as f64) * dpi).round() as usize;
+        let label_h = ((LABEL_H as f64) * dpi).round() as usize;
 
         // (Action, label, keys, gap from the previous button). All gaps
         // are currently 0 (packed together); to space out a specific
@@ -97,7 +106,7 @@ impl Menu {
         ];
         let total_gap: usize = specs.iter().map(|(.., g)| g).sum();
         let panel_w = action_btn * N + total_gap;
-        let panel_h = action_btn;
+        let panel_h = label_h + action_btn;
 
         // Horizontal position: aligned to the selection's left edge, clamped within bounds.
         let px = sel
@@ -120,6 +129,13 @@ impl Menu {
             x1: px + panel_w,
             y1: py + panel_h,
         };
+        let label_rect = Rect {
+            x0: px,
+            y0: py,
+            x1: px + panel_w,
+            y1: py + label_h,
+        };
+        let buttons_y = py + label_h;
 
         let mut buttons: [Button; N] = std::array::from_fn(|_| Button {
             rect: panel,
@@ -136,9 +152,9 @@ impl Menu {
             buttons[i] = Button {
                 rect: Rect {
                     x0: bx,
-                    y0: py,
+                    y0: buttons_y,
                     x1: bx + action_btn,
-                    y1: py + action_btn,
+                    y1: buttons_y + action_btn,
                 },
                 disabled: matches!(action, Action::Upload) && !uploaders_configured,
                 action,
@@ -148,7 +164,11 @@ impl Menu {
             bx += action_btn;
         }
 
-        Self { buttons }
+        Self {
+            buttons,
+            size_label: format!("{} x {}", sel.width(), sel.height()),
+            label_rect,
+        }
     }
 
     /// Index of the button containing point `(x, y)`, regardless of
@@ -171,6 +191,24 @@ pub fn draw(
     pressed: Option<usize>,
     text: Option<&TextRenderer>,
 ) {
+    canvas.fill(menu.label_rect, BTN_BG);
+    if let Some(t) = text {
+        let tw = t.text_width(&menu.size_label, LABEL_FONT);
+        let lx = menu.label_rect.x0 as f32 + (menu.label_rect.width() as f32 - tw) / 2.0;
+        let baseline = t.baseline_for_center(
+            (menu.label_rect.y0 + menu.label_rect.y1) as f32 / 2.0,
+            LABEL_FONT,
+        );
+        t.draw(
+            canvas,
+            lx,
+            baseline,
+            &menu.size_label,
+            LABEL_FONT,
+            TEXT_COLOR,
+        );
+    }
+
     for (i, btn) in menu.buttons.iter().enumerate() {
         let (bg, icon_color, text_color) = if btn.disabled {
             (BTN_DISABLED_BG, ICON_DISABLED, TEXT_DISABLED)
@@ -216,6 +254,22 @@ mod tests {
             record: vec![LocalKey::new(false, false, false, 'v')],
             quit: vec![LocalKey::new(false, false, false, 'q')],
         }
+    }
+
+    #[test]
+    fn menu_shows_the_selection_size_as_a_label_above_the_buttons() {
+        let m = Menu::layout(
+            sel(100, 100, 100 + 1280, 100 + 720),
+            full_hd(),
+            &test_keys(),
+            true,
+            1.0,
+        );
+        assert_eq!(m.size_label, "1280 x 720");
+        // The label sits directly above the button row, spanning the same width.
+        assert_eq!(m.label_rect.y1, m.buttons[0].rect.y0);
+        assert_eq!(m.label_rect.x0, m.buttons[0].rect.x0);
+        assert_eq!(m.label_rect.x1, m.buttons[m.buttons.len() - 1].rect.x1);
     }
 
     #[test]
