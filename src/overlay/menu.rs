@@ -29,6 +29,48 @@ const MARGIN: usize = 10;
 /// Height of the size-label row above the buttons.
 const LABEL_H: usize = 22;
 const LABEL_FONT: f32 = 12.0;
+/// Height of the aspect-ratio row above the size-label row.
+const ASPECT_ROW_H: usize = 22;
+const ASPECT_FONT: f32 = 12.0;
+
+/// Aspect-ratio presets the dropdown offers (`None` = free/unlocked),
+/// in display order.
+pub(super) const ASPECT_PRESETS: [Option<(u32, u32)>; 4] =
+    [None, Some((1, 1)), Some((16, 9)), Some((4, 3))];
+
+/// The label shown for a preset ("Free", "1:1", ...).
+pub(super) fn aspect_option_label(preset: Option<(u32, u32)>) -> String {
+    match preset {
+        None => "Free".to_string(),
+        Some((w, h)) => format!("{w}:{h}"),
+    }
+}
+
+/// The closed dropdown button's label.
+fn aspect_label(lock: Option<(u32, u32)>) -> String {
+    format!("Aspect: {}", aspect_option_label(lock))
+}
+
+/// The 4 option rows shown while the aspect dropdown is open, stacked
+/// directly below the closed button (`closed`), in `ASPECT_PRESETS` order.
+pub(super) fn aspect_option_rects(closed: Rect) -> [Rect; 4] {
+    std::array::from_fn(|i| {
+        let y0 = closed.y1 + i * ASPECT_ROW_H;
+        Rect {
+            x0: closed.x0,
+            y0,
+            x1: closed.x1,
+            y1: y0 + ASPECT_ROW_H,
+        }
+    })
+}
+
+/// Index into `ASPECT_PRESETS` of the option row containing `(x, y)`, if any.
+pub(super) fn aspect_option_hit(closed: Rect, x: usize, y: usize) -> Option<usize> {
+    aspect_option_rects(closed)
+        .iter()
+        .position(|r| x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1)
+}
 
 const BTN_BG: u32 = 0x0033_3333;
 const BTN_HOVER: u32 = 0x0045_4545;
@@ -52,9 +94,9 @@ pub struct Button {
     pub disabled: bool,
 }
 
-/// A menu with a fixed `N` buttons, plus a label row above them showing
-/// the selection's pixel size. No frame is drawn around the buttons (each
-/// stands alone).
+/// A menu with a fixed `N` buttons, plus (top to bottom) an aspect-ratio
+/// dropdown row and a label row showing the selection's pixel size. No
+/// frame is drawn around the buttons (each stands alone).
 #[derive(Clone)]
 pub struct Menu {
     pub buttons: [Button; N],
@@ -62,6 +104,9 @@ pub struct Menu {
     /// need the selection rect too.
     pub size_label: String,
     pub label_rect: Rect,
+    /// The aspect-ratio dropdown's closed-button label ("Aspect: Free", ...).
+    pub aspect_label: String,
+    pub aspect_rect: Rect,
 }
 
 impl Menu {
@@ -87,11 +132,13 @@ impl Menu {
         bounds: Rect,
         keys: &MenuKeys,
         uploaders_configured: bool,
+        aspect_lock: Option<(u32, u32)>,
         dpi: f64,
     ) -> Self {
         let action_btn = ((ACTION_BTN as f64) * dpi).round() as usize;
         let margin = ((MARGIN as f64) * dpi).round() as usize;
         let label_h = ((LABEL_H as f64) * dpi).round() as usize;
+        let aspect_row_h = ((ASPECT_ROW_H as f64) * dpi).round() as usize;
 
         // (Action, label, keys, gap from the previous button). All gaps
         // are currently 0 (packed together); to space out a specific
@@ -106,7 +153,7 @@ impl Menu {
         ];
         let total_gap: usize = specs.iter().map(|(.., g)| g).sum();
         let panel_w = action_btn * N + total_gap;
-        let panel_h = label_h + action_btn;
+        let panel_h = aspect_row_h + label_h + action_btn;
 
         // Horizontal position: aligned to the selection's left edge, clamped within bounds.
         let px = sel
@@ -129,13 +176,19 @@ impl Menu {
             x1: px + panel_w,
             y1: py + panel_h,
         };
-        let label_rect = Rect {
+        let aspect_rect = Rect {
             x0: px,
             y0: py,
             x1: px + panel_w,
-            y1: py + label_h,
+            y1: py + aspect_row_h,
         };
-        let buttons_y = py + label_h;
+        let label_rect = Rect {
+            x0: px,
+            y0: py + aspect_row_h,
+            x1: px + panel_w,
+            y1: py + aspect_row_h + label_h,
+        };
+        let buttons_y = py + aspect_row_h + label_h;
 
         let mut buttons: [Button; N] = std::array::from_fn(|_| Button {
             rect: panel,
@@ -168,6 +221,8 @@ impl Menu {
             buttons,
             size_label: format!("{} x {}", sel.width(), sel.height()),
             label_rect,
+            aspect_label: aspect_label(aspect_lock),
+            aspect_rect,
         }
     }
 
@@ -184,13 +239,35 @@ impl Menu {
 }
 
 /// Draws the menu. `hovered`/`pressed` are button indices.
+/// `aspect_dropdown_open` draws the option list below the aspect-ratio
+/// row instead of just its closed label.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     canvas: &mut Canvas,
     menu: &Menu,
     hovered: Option<usize>,
     pressed: Option<usize>,
     text: Option<&TextRenderer>,
+    aspect_lock: Option<(u32, u32)>,
+    aspect_dropdown_open: bool,
 ) {
+    canvas.fill(menu.aspect_rect, BTN_BG);
+    if let Some(t) = text {
+        let tw = t.text_width(&menu.aspect_label, ASPECT_FONT);
+        let lx = menu.aspect_rect.x0 as f32 + (menu.aspect_rect.width() as f32 - tw) / 2.0;
+        let baseline = t.baseline_for_center(
+            (menu.aspect_rect.y0 + menu.aspect_rect.y1) as f32 / 2.0,
+            ASPECT_FONT,
+        );
+        t.draw(
+            canvas,
+            lx,
+            baseline,
+            &menu.aspect_label,
+            ASPECT_FONT,
+            TEXT_COLOR,
+        );
+    }
     canvas.fill(menu.label_rect, BTN_BG);
     if let Some(t) = text {
         let tw = t.text_width(&menu.size_label, LABEL_FONT);
@@ -223,6 +300,25 @@ pub fn draw(
             draw_icon_button(canvas, btn.rect, bg, icon_color, btn.label, text_color, t);
         } else {
             canvas.fill(btn.rect, bg);
+        }
+    }
+
+    // Drawn last so the open option list sits on top of the size label
+    // and buttons it overlaps, instead of being painted over by them.
+    if aspect_dropdown_open {
+        for (rect, preset) in aspect_option_rects(menu.aspect_rect)
+            .into_iter()
+            .zip(ASPECT_PRESETS)
+        {
+            let selected = preset == aspect_lock;
+            canvas.fill(rect, if selected { BTN_PRESSED } else { BTN_HOVER });
+            if let Some(t) = text {
+                let label = aspect_option_label(preset);
+                let tw = t.text_width(&label, ASPECT_FONT);
+                let lx = rect.x0 as f32 + (rect.width() as f32 - tw) / 2.0;
+                let baseline = t.baseline_for_center((rect.y0 + rect.y1) as f32 / 2.0, ASPECT_FONT);
+                t.draw(canvas, lx, baseline, &label, ASPECT_FONT, TEXT_COLOR);
+            }
         }
     }
 }
@@ -263,6 +359,7 @@ mod tests {
             full_hd(),
             &test_keys(),
             true,
+            None,
             1.0,
         );
         assert_eq!(m.size_label, "1280 x 720");
@@ -274,7 +371,14 @@ mod tests {
 
     #[test]
     fn menu_sits_below_selection_when_space_allows() {
-        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), true, 1.0);
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_keys(),
+            true,
+            None,
+            1.0,
+        );
         // Placed below the selection (y1=200 plus margin).
         assert!(m.buttons[0].rect.y0 >= 200);
         assert_eq!(m.buttons.len(), 6);
@@ -298,6 +402,46 @@ mod tests {
     }
 
     #[test]
+    fn menu_shows_the_aspect_dropdown_above_the_size_label() {
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_keys(),
+            true,
+            Some((16, 9)),
+            1.0,
+        );
+        assert_eq!(m.aspect_label, "Aspect: 16:9");
+        // Sits directly above the size label, spanning the same width.
+        assert_eq!(m.aspect_rect.y1, m.label_rect.y0);
+        assert_eq!(m.aspect_rect.x0, m.label_rect.x0);
+        assert_eq!(m.aspect_rect.x1, m.label_rect.x1);
+    }
+
+    #[test]
+    fn aspect_option_rects_stack_below_the_closed_button_without_overlap() {
+        let closed = Rect {
+            x0: 10,
+            y0: 20,
+            x1: 110,
+            y1: 42,
+        };
+        let rows = aspect_option_rects(closed);
+        assert_eq!(rows[0].y0, closed.y1);
+        for pair in rows.windows(2) {
+            assert_eq!(
+                pair[0].y1, pair[1].y0,
+                "rows must be contiguous, no gaps/overlap"
+            );
+            assert_eq!(pair[0].x0, closed.x0);
+            assert_eq!(pair[0].x1, closed.x1);
+        }
+        // Matches ASPECT_PRESETS order.
+        assert_eq!(aspect_option_label(ASPECT_PRESETS[0]), "Free");
+        assert_eq!(aspect_option_label(ASPECT_PRESETS[1]), "1:1");
+    }
+
+    #[test]
     fn menu_flips_above_when_no_space_below() {
         // The selection touches the bottom edge -> no room below, so it flips above.
         let m = Menu::layout(
@@ -305,6 +449,7 @@ mod tests {
             full_hd(),
             &test_keys(),
             true,
+            None,
             1.0,
         );
         assert!(m.buttons[0].rect.y1 <= 1000);
@@ -322,7 +467,14 @@ mod tests {
             x1: 3840,
             y1: 1000,
         };
-        let m = Menu::layout(sel(3700, 900, 3800, 990), bounds, &test_keys(), true, 1.0);
+        let m = Menu::layout(
+            sel(3700, 900, 3800, 990),
+            bounds,
+            &test_keys(),
+            true,
+            None,
+            1.0,
+        );
         for b in &m.buttons {
             assert!(b.rect.x0 >= bounds.x0 && b.rect.x1 <= bounds.x1);
             assert!(b.rect.y0 >= bounds.y0 && b.rect.y1 <= bounds.y1);
@@ -331,7 +483,14 @@ mod tests {
 
     #[test]
     fn hit_returns_button_index_or_none() {
-        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), true, 1.0);
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_keys(),
+            true,
+            None,
+            1.0,
+        );
         let b0 = m.buttons[0].rect;
         // The button's center hits.
         let cx = (b0.x0 + b0.x1) / 2;
@@ -343,7 +502,14 @@ mod tests {
 
     #[test]
     fn upload_button_is_disabled_without_configured_uploaders_but_still_absorbs_clicks() {
-        let m = Menu::layout(sel(100, 100, 300, 200), full_hd(), &test_keys(), false, 1.0);
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_keys(),
+            false,
+            None,
+            1.0,
+        );
         assert!(m.buttons[3].disabled);
         let b3 = m.buttons[3].rect;
         let cx = (b3.x0 + b3.x1) / 2;

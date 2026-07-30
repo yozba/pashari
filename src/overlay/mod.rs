@@ -462,6 +462,12 @@ pub struct Overlay {
     adjust: Adjust,
     /// The menu's layout (when `selection` is `Some`).
     menu: Option<menu::Menu>,
+    /// Locks the selection to a fixed w:h ratio (`None` = free). Set via
+    /// the menu's aspect-ratio dropdown; persists across selections for
+    /// the session (not saved to config).
+    aspect_lock: Option<(u32, u32)>,
+    /// Whether the aspect-ratio dropdown's option list is open.
+    aspect_dropdown_open: bool,
     /// Index of the hovered / pressed button.
     hovered: Option<usize>,
     pressed: Option<usize>,
@@ -598,6 +604,8 @@ impl Overlay {
             selection: None,
             adjust: Adjust::Idle,
             menu: None,
+            aspect_lock: None,
+            aspect_dropdown_open: false,
             hovered: None,
             pressed: None,
             text: TextRenderer::load(),
@@ -746,7 +754,14 @@ impl Overlay {
                 .and_then(|i| self.frozen.monitor_dpis.get(i))
                 .copied()
                 .unwrap_or(1.0);
-            menu::Menu::layout(sel, bounds, &self.keys.menu, uploaders_configured, dpi)
+            menu::Menu::layout(
+                sel,
+                bounds,
+                &self.keys.menu,
+                uploaders_configured,
+                self.aspect_lock,
+                dpi,
+            )
         });
     }
 
@@ -780,7 +795,10 @@ impl Overlay {
         };
         let img = self.img_size();
         let new = match self.adjust {
-            Adjust::Resizing(h) => resize_rect(sel, h, self.cursor_src, img),
+            Adjust::Resizing(h) => match self.aspect_lock {
+                Some(ratio) => resize_rect_locked(sel, h, self.cursor_src, img, ratio),
+                None => resize_rect(sel, h, self.cursor_src, img),
+            },
             Adjust::Moving { anchor, orig } => {
                 let delta = (self.cursor_src.0 - anchor.0, self.cursor_src.1 - anchor.1);
                 move_rect(orig, delta, img)
@@ -1716,6 +1734,8 @@ impl Overlay {
         let menu_geo = self.menu.clone();
         let hovered = self.hovered;
         let pressed = self.pressed;
+        let aspect_lock = self.aspect_lock;
+        let aspect_dropdown_open = self.aspect_dropdown_open;
         let view = self.view();
         let fine = self.fine;
         let selecting = matches!(self.mode, Mode::Selecting);
@@ -1817,7 +1837,15 @@ impl Overlay {
             }
 
             if let Some(m) = menu_geo.as_ref() {
-                menu::draw(&mut canvas, m, hovered, pressed, text);
+                menu::draw(
+                    &mut canvas,
+                    m,
+                    hovered,
+                    pressed,
+                    text,
+                    aspect_lock,
+                    aspect_dropdown_open,
+                );
             }
         }
 
@@ -2006,6 +2034,137 @@ fn resize_rect(r: Rect, h: Handle, cursor: (f64, f64), img: (usize, usize)) -> R
         Handle::Left | Handle::Right => {}
     }
     Rect { x0, y0, x1, y1 }
+}
+
+/// Reshapes `r` to `ratio` (w:h), keeping its center fixed and inscribed
+/// within the old rect — of the two ways to hit the ratio (keep width and
+/// shrink height, or keep height and shrink width), picks whichever
+/// actually fits inside the old rect and has the larger area. Used when
+/// the aspect-ratio dropdown locks to a new ratio.
+fn fit_rect_to_ratio(r: Rect, ratio: (u32, u32), img: (usize, usize)) -> Rect {
+    let (rw, rh) = (ratio.0 as f64, ratio.1 as f64);
+    let (w, h) = (r.width() as f64, r.height() as f64);
+    let cx = (r.x0 as f64 + r.x1 as f64) / 2.0;
+    let cy = (r.y0 as f64 + r.y1 as f64) / 2.0;
+
+    let by_width = (w, w * rh / rw);
+    let by_height = (h * rw / rh, h);
+    let (new_w, new_h) = match (by_width.1 <= h, by_height.0 <= w) {
+        (true, false) => by_width,
+        (false, true) => by_height,
+        // Both fit (ratio unchanged) or neither does (float rounding at
+        // the margin) — either way, take the larger-area candidate.
+        _ => {
+            if by_width.0 * by_width.1 >= by_height.0 * by_height.1 {
+                by_width
+            } else {
+                by_height
+            }
+        }
+    };
+
+    let x0 = (cx - new_w / 2.0).round().max(0.0);
+    let y0 = (cy - new_h / 2.0).round().max(0.0);
+    let rect = Rect {
+        x0: x0 as usize,
+        y0: y0 as usize,
+        x1: (x0 + new_w.max(1.0)).round() as usize,
+        y1: (y0 + new_h.max(1.0)).round() as usize,
+    };
+    clamp_rect_to_image(rect, img)
+}
+
+/// Like `resize_rect`, but keeps `ratio` (w:h) fixed. The point opposite
+/// the dragged handle stays anchored: for a corner handle that's the
+/// opposite corner; for an edge handle it's the midpoint of the opposite
+/// edge (so e.g. dragging the bottom edge grows the rect symmetrically
+/// left/right around that midpoint, while the top edge stays put).
+/// Corner handles pick whichever axis the cursor implies the larger rect
+/// on, so the rect visibly tracks the cursor regardless of drag angle.
+/// Clamped within `img`, minimum 1px per side, never flips (same
+/// contract as `resize_rect`).
+fn resize_rect_locked(
+    r: Rect,
+    h: Handle,
+    cursor: (f64, f64),
+    img: (usize, usize),
+    ratio: (u32, u32),
+) -> Rect {
+    let (fw, fh) = img;
+    let cx = cursor.0.clamp(0.0, (fw.max(1) - 1) as f64);
+    let cy = cursor.1.clamp(0.0, (fh.max(1) - 1) as f64);
+    let (rw, rh) = (ratio.0 as f64, ratio.1 as f64);
+
+    // The fixed point: the opposite corner, or the opposite edge's
+    // midpoint for an edge handle.
+    let (ax, ay): (f64, f64) = match h {
+        Handle::TopLeft => (r.x1 as f64, r.y1 as f64),
+        Handle::TopRight => (r.x0 as f64, r.y1 as f64),
+        Handle::BottomLeft => (r.x1 as f64, r.y0 as f64),
+        Handle::BottomRight => (r.x0 as f64, r.y0 as f64),
+        Handle::Top => ((r.x0 + r.x1) as f64 / 2.0, r.y1 as f64),
+        Handle::Bottom => ((r.x0 + r.x1) as f64 / 2.0, r.y0 as f64),
+        Handle::Left => (r.x1 as f64, (r.y0 + r.y1) as f64 / 2.0),
+        Handle::Right => (r.x0 as f64, (r.y0 + r.y1) as f64 / 2.0),
+    };
+    let dx = (cx - ax).abs();
+    let dy = (cy - ay).abs();
+
+    let (mut w, mut rect_h) = match h {
+        Handle::TopLeft | Handle::TopRight | Handle::BottomLeft | Handle::BottomRight => {
+            let by_dx = (dx, dx * rh / rw);
+            let by_dy = (dy * rw / rh, dy);
+            if by_dx.0 * by_dx.1 >= by_dy.0 * by_dy.1 {
+                by_dx
+            } else {
+                by_dy
+            }
+        }
+        Handle::Top | Handle::Bottom => (dy * rw / rh, dy),
+        Handle::Left | Handle::Right => (dx, dx * rh / rw),
+    };
+    w = w.max(1.0);
+    rect_h = rect_h.max(1.0);
+
+    // How far the rect can grow from the anchor before hitting the image
+    // edge. Edge handles grow symmetrically around the anchor on their
+    // perpendicular axis, so both directions from it must fit.
+    let max_w = match h {
+        Handle::TopLeft | Handle::BottomLeft | Handle::Left => ax,
+        Handle::TopRight | Handle::BottomRight | Handle::Right => fw as f64 - ax,
+        Handle::Top | Handle::Bottom => 2.0 * ax.min(fw as f64 - ax),
+    };
+    let max_h = match h {
+        Handle::TopLeft | Handle::TopRight | Handle::Top => ay,
+        Handle::BottomLeft | Handle::BottomRight | Handle::Bottom => fh as f64 - ay,
+        Handle::Left | Handle::Right => 2.0 * ay.min(fh as f64 - ay),
+    };
+    let scale = (max_w / w).min(max_h / rect_h).min(1.0);
+    if scale.is_finite() && scale > 0.0 {
+        w *= scale;
+        rect_h *= scale;
+    }
+    w = w.max(1.0);
+    rect_h = rect_h.max(1.0);
+
+    let (x0, x1) = match h {
+        Handle::TopLeft | Handle::Left | Handle::BottomLeft => (ax - w, ax),
+        Handle::TopRight | Handle::Right | Handle::BottomRight => (ax, ax + w),
+        Handle::Top | Handle::Bottom => (ax - w / 2.0, ax + w / 2.0),
+    };
+    let (y0, y1) = match h {
+        Handle::TopLeft | Handle::Top | Handle::TopRight => (ay - rect_h, ay),
+        Handle::BottomLeft | Handle::Bottom | Handle::BottomRight => (ay, ay + rect_h),
+        Handle::Left | Handle::Right => (ay - rect_h / 2.0, ay + rect_h / 2.0),
+    };
+
+    let rect = Rect {
+        x0: x0.round().max(0.0) as usize,
+        y0: y0.round().max(0.0) as usize,
+        x1: x1.round().max(1.0) as usize,
+        y1: y1.round().max(1.0) as usize,
+    };
+    clamp_rect_to_image(rect, img)
 }
 
 /// Translates `orig` by `delta` (src coordinates) keeping its size, clamped within the image.
@@ -2624,6 +2783,33 @@ impl Overlay {
                 if button == MouseButton::Left {
                     match state {
                         ElementState::Pressed => {
+                            // The aspect-ratio dropdown takes priority over
+                            // everything else in the menu.
+                            if let Some(m) = self.menu.as_ref() {
+                                let (cx, cy) = self.cursor_px();
+                                if self.aspect_dropdown_open {
+                                    self.aspect_dropdown_open = false;
+                                    if let Some(i) = menu::aspect_option_hit(m.aspect_rect, cx, cy)
+                                    {
+                                        let preset = menu::ASPECT_PRESETS[i];
+                                        self.aspect_lock = preset;
+                                        if let (Some(ratio), Some(sel)) = (preset, self.selection) {
+                                            let img = self.img_size();
+                                            self.selection =
+                                                Some(fit_rect_to_ratio(sel, ratio, img));
+                                        }
+                                        self.build_menu();
+                                    }
+                                    self.request_redraw();
+                                    return;
+                                }
+                                let ar = m.aspect_rect;
+                                if cx >= ar.x0 && cx < ar.x1 && cy >= ar.y0 && cy < ar.y1 {
+                                    self.aspect_dropdown_open = true;
+                                    self.request_redraw();
+                                    return;
+                                }
+                            }
                             // Menu buttons take priority.
                             if let Some(m) = self.menu.as_ref() {
                                 let (cx, cy) = self.cursor_px();
@@ -2698,7 +2884,10 @@ impl Overlay {
                                 };
                                 self.dragging = false;
                                 if let Some(r) = chosen {
-                                    self.selection = Some(r);
+                                    self.selection = Some(match self.aspect_lock {
+                                        Some(ratio) => fit_rect_to_ratio(r, ratio, self.img_size()),
+                                        None => r,
+                                    });
                                     self.snap_rect = None;
                                     self.zoom = 1.0;
                                     if self.fine {
@@ -3154,6 +3343,65 @@ mod tests {
         // Dragging the left edge past the right edge still keeps x0 < x1.
         let out = resize_rect(r, Handle::Left, (99.0, 30.0), img);
         assert_eq!(out, rect(29, 20, 30, 40));
+    }
+
+    #[test]
+    fn fit_rect_to_ratio_shrinks_the_wider_axis_to_match() {
+        // 100x60, wider than 1:1 -> keeps height, shrinks width, centered.
+        let r = rect(0, 0, 100, 60);
+        let out = fit_rect_to_ratio(r, (1, 1), (1000, 1000));
+        assert_eq!(out, rect(20, 0, 80, 60));
+    }
+
+    #[test]
+    fn fit_rect_to_ratio_shrinks_the_taller_axis_to_match() {
+        // 60x100, taller than 1:1 -> keeps width, shrinks height, centered.
+        let r = rect(0, 0, 60, 100);
+        let out = fit_rect_to_ratio(r, (1, 1), (1000, 1000));
+        assert_eq!(out, rect(0, 20, 60, 80));
+    }
+
+    #[test]
+    fn fit_rect_to_ratio_is_a_no_op_when_already_at_the_target_ratio() {
+        let r = rect(0, 0, 80, 40); // Already 2:1.
+        let out = fit_rect_to_ratio(r, (2, 1), (1000, 1000));
+        assert_eq!(out, r);
+    }
+
+    #[test]
+    fn resize_rect_locked_corner_keeps_ratio_and_picks_larger_axis() {
+        let r = rect(10, 10, 30, 30);
+        let img = (1000, 1000);
+        // BottomRight anchors the opposite corner (TopLeft, (10,10)).
+        // Cursor moved much further in x (40) than y (10); at ratio 2:1
+        // the x-driven candidate (40x20) has more area than the y-driven
+        // one (20x10), so it wins.
+        let out = resize_rect_locked(r, Handle::BottomRight, (50.0, 20.0), img, (2, 1));
+        assert_eq!(out, rect(10, 10, 50, 30));
+    }
+
+    #[test]
+    fn resize_rect_locked_edge_handle_grows_symmetrically_around_the_opposite_edge() {
+        // 20x20 square centered at x=210.
+        let r = rect(200, 20, 220, 40);
+        let img = (1000, 1000);
+        // Dragging the bottom edge down 40px at ratio 2:1 grows the width
+        // to 80, centered on the original horizontal center (210) — the
+        // top edge (the anchor) doesn't move.
+        let out = resize_rect_locked(r, Handle::Bottom, (215.0, 60.0), img, (2, 1));
+        assert_eq!(out, rect(170, 20, 250, 60));
+    }
+
+    #[test]
+    fn resize_rect_locked_clamps_to_image_while_keeping_ratio() {
+        let r = rect(40, 40, 60, 60);
+        let img = (100, 100);
+        // A very tall target ratio (1:20) dragged from BottomRight would
+        // overshoot the image's bottom edge (anchor at y=40, only 60px of
+        // room) — the whole rect scales down, keeping 1:20 exactly, until
+        // it just touches the edge.
+        let out = resize_rect_locked(r, Handle::BottomRight, (45.0, 99.0), img, (1, 20));
+        assert_eq!(out, rect(40, 40, 43, 100));
     }
 
     #[test]
