@@ -283,6 +283,41 @@ impl Field {
             Field::Block => "Block",
         }
     }
+
+    fn range(self) -> (f64, f64) {
+        match self {
+            Field::Line => THICK_RANGE,
+            Field::Size => SIZE_RANGE,
+            Field::Number => NUMBER_RANGE,
+            Field::Block => BLOCK_RANGE,
+        }
+    }
+}
+
+/// A numeric field's press-to-drag state (see `PropCtrl::Field`).
+/// `dragging` flips to `true` only once the pointer passes
+/// `FIELD_DRAG_THRESHOLD`, so a plain click still falls through to
+/// `focus_field` (type-to-edit) on release.
+#[derive(Clone, Copy)]
+struct FieldDrag {
+    field: Field,
+    start_x: f64,
+    start_value: f64,
+    dragging: bool,
+}
+
+/// Screen px of pointer movement before a press on a numeric field counts
+/// as a drag rather than a click.
+const FIELD_DRAG_THRESHOLD: f64 = 3.0;
+/// Screen px of drag distance that covers a field's full range (see
+/// `Field::range`) — keeps Number (range 9998) and Line (range 199)
+/// feeling similarly paced despite the very different spans.
+const FIELD_DRAG_FULL_RANGE_PX: f64 = 300.0;
+
+/// Value change per screen px while dragging `field` (see `FieldDrag`).
+fn field_drag_sensitivity(field: Field) -> f64 {
+    let (lo, hi) = field.range();
+    (hi - lo) / FIELD_DRAG_FULL_RANGE_PX
 }
 
 /// A top-bar-left property control.
@@ -447,6 +482,8 @@ pub struct Editor {
     /// Focus and edit buffer for a numeric input field.
     focus: Option<Field>,
     buf: String,
+    /// A numeric field's press-to-drag state (see `PropCtrl::Field`).
+    field_drag: Option<FieldDrag>,
     /// Color picker (`Some` = open, holding HSV) and its drag target.
     picker: Option<(f32, f32, f32)>,
     picker_drag: Option<PickerPart>,
@@ -457,6 +494,9 @@ pub struct Editor {
 
     hover: Option<EditorBtn>,
     pressed: Option<EditorBtn>,
+    /// Hovered top-bar property control (Color/Field/Step/Fill/Blur),
+    /// separate from `hover` since it's a different hit-test (`prop_at`).
+    prop_hover: Option<PropCtrl>,
     /// Whether always-on-top is active (the Pin toggle, default false).
     pinned: bool,
     ctrl: bool,
@@ -675,12 +715,14 @@ impl Editor {
             new_item_seed: 0,
             focus: None,
             buf: String::new(),
+            field_drag: None,
             picker: None,
             picker_drag: None,
             editing: None,
             ime_preedit: String::new(),
             hover: None,
             pressed: None,
+            prop_hover: None,
             pinned: false,
             ctrl: false,
             shift: false,
@@ -1178,6 +1220,22 @@ impl Editor {
                 if self.picker_drag.is_some() {
                     // Follow the color picker drag.
                     self.apply_picker(x, y);
+                } else if let Some(fd) = self.field_drag {
+                    let dx = x - fd.start_x;
+                    if !fd.dragging && dx.abs() >= FIELD_DRAG_THRESHOLD {
+                        if !self.selected.is_empty() && fd.field != Field::Number {
+                            self.push_undo();
+                        }
+                        self.field_drag = Some(FieldDrag {
+                            dragging: true,
+                            ..fd
+                        });
+                    }
+                    if self.field_drag.is_some_and(|fd| fd.dragging) {
+                        let v = fd.start_value + dx * field_drag_sensitivity(fd.field);
+                        self.set_field_value(fd.field, v);
+                        self.request_redraw();
+                    }
                 } else if !matches!(self.edit, EditDrag::None) {
                     // Follow the item while moving/resizing.
                     self.apply_edit();
@@ -1195,8 +1253,10 @@ impl Editor {
                         }
                     }
                     let h = self.button_at(x as usize, y as usize);
-                    if h != self.hover {
+                    let ph = self.prop_at(x as usize, y as usize);
+                    if h != self.hover || ph != self.prop_hover {
                         self.hover = h;
+                        self.prop_hover = ph;
                         self.request_redraw();
                     } else if self.dragging
                         || (self.tool == Tool::Polyline && !self.polyline_pts.is_empty())
@@ -1421,6 +1481,13 @@ impl Editor {
                 if self.picker_drag.take().is_some() {
                     return false;
                 }
+                if let Some(fd) = self.field_drag.take() {
+                    if !fd.dragging {
+                        // A plain click (never crossed the drag threshold): fall through to the usual type-to-edit.
+                        self.focus_field(fd.field);
+                    }
+                    return false;
+                }
                 if let Some(btn) = self.pressed.take() {
                     if self.button_at(wx as usize, wy as usize) == Some(btn) {
                         self.activate(btn);
@@ -1505,7 +1572,14 @@ impl Editor {
             if let Some(pc) = self.prop_at(wx as usize, wy as usize) {
                 match pc {
                     PropCtrl::Color => self.toggle_picker(),
-                    PropCtrl::Field(f) => self.focus_field(f),
+                    PropCtrl::Field(f) => {
+                        self.field_drag = Some(FieldDrag {
+                            field: f,
+                            start_x: wx,
+                            start_value: self.field_value(f),
+                            dragging: false,
+                        });
+                    }
                     PropCtrl::Step(f, up) => self.step_field(f, up),
                     PropCtrl::Fill => self.toggle_fill(),
                     PropCtrl::Blur => self.toggle_blur(),
@@ -2164,36 +2238,42 @@ impl Editor {
         self.request_redraw();
     }
 
+    /// The field's current value (default plus selected items' representative value).
+    fn field_value(&self, field: Field) -> f64 {
+        let (_, thick, size, _, block, _) = self.active_style();
+        match field {
+            Field::Line => thick.value() as f64,
+            Field::Size => size.value() as f64,
+            Field::Number => self.next_marker_num as f64,
+            Field::Block => block.value() as f64,
+        }
+    }
+
+    /// Clamps `v` to `field`'s range and applies it (default plus selected
+    /// items, all at once — via the same `set_*` each field already uses).
+    fn set_field_value(&mut self, field: Field, v: f64) {
+        let v = v.clamp(field.range().0, field.range().1);
+        match field {
+            Field::Line => self.set_thick(v.round() as i64),
+            Field::Size => self.set_size(v as f32),
+            Field::Number => self.next_marker_num = v.round() as u32,
+            Field::Block => self.set_block(v as f32),
+        }
+    }
+
     /// Commits the focused numeric field (parse -> clamp -> apply).
     fn commit_field(&mut self) {
         let Some(field) = self.focus.take() else {
             return;
         };
-        let (_, thick, size, _, block, _) = self.active_style();
         // Number is tool-level state (the next number to place), not a
         // property of a selected item, so push_undo is skipped even with
         // a selection (annotations' content doesn't change).
         if !self.selected.is_empty() && field != Field::Number {
             self.push_undo();
         }
-        match field {
-            Field::Line => {
-                let v = parse_dim(&self.buf, thick.value() as f64, THICK_RANGE);
-                self.set_thick(v.round() as i64);
-            }
-            Field::Size => {
-                let v = parse_dim(&self.buf, size.value() as f64, SIZE_RANGE);
-                self.set_size(v as f32);
-            }
-            Field::Number => {
-                let v = parse_dim(&self.buf, self.next_marker_num as f64, NUMBER_RANGE);
-                self.next_marker_num = v.round() as u32;
-            }
-            Field::Block => {
-                let v = parse_dim(&self.buf, block.value() as f64, BLOCK_RANGE);
-                self.set_block(v as f32);
-            }
-        }
+        let v = parse_dim(&self.buf, self.field_value(field), field.range());
+        self.set_field_value(field, v);
         self.buf.clear();
         self.request_redraw();
     }
@@ -2201,29 +2281,11 @@ impl Editor {
     /// Steps thickness/size/next-number by one via the ±stepper (default plus selected items, all at once).
     fn step_field(&mut self, field: Field, up: bool) {
         self.commit_field();
-        let (_, thick, size, _, block, _) = self.active_style();
         let d = if up { 1.0 } else { -1.0 };
         if !self.selected.is_empty() && field != Field::Number {
             self.push_undo();
         }
-        match field {
-            Field::Line => {
-                let v = (thick.value() as f64 + d).clamp(THICK_RANGE.0, THICK_RANGE.1);
-                self.set_thick(v as i64);
-            }
-            Field::Size => {
-                let v = (size.value() as f64 + d).clamp(SIZE_RANGE.0, SIZE_RANGE.1);
-                self.set_size(v as f32);
-            }
-            Field::Number => {
-                let v = (self.next_marker_num as f64 + d).clamp(NUMBER_RANGE.0, NUMBER_RANGE.1);
-                self.next_marker_num = v as u32;
-            }
-            Field::Block => {
-                let v = (block.value() as f64 + d).clamp(BLOCK_RANGE.0, BLOCK_RANGE.1);
-                self.set_block(v as f32);
-            }
-        }
+        self.set_field_value(field, self.field_value(field) + d);
         self.request_redraw();
     }
 
@@ -2439,7 +2501,17 @@ impl Editor {
         };
         let (wx, wy) = self.cursor;
         if wy < TOOLBAR_H as f64 || wx < TOOLBAR_W as f64 {
-            w.set_cursor(CursorIcon::Default);
+            // A left/right resize arrow over a draggable numeric field
+            // hints that it can be dragged, not just clicked into.
+            let over_field = matches!(
+                self.prop_at(wx as usize, wy as usize),
+                Some(PropCtrl::Field(_))
+            );
+            w.set_cursor(if over_field {
+                CursorIcon::EwResize
+            } else {
+                CursorIcon::Default
+            });
             return;
         }
         if self.tool == Tool::Guide {
@@ -2902,6 +2974,7 @@ impl Editor {
         let tools = tool_buttons();
         let icons = &self.icons;
         let hover = self.hover;
+        let prop_hover = self.prop_hover;
         let tool = self.tool;
         let dragging = self.dragging;
         let pinned = self.pinned;
@@ -3256,17 +3329,27 @@ impl Editor {
                         }
                     }
                     PropCtrl::Step(_, up) => {
-                        canvas.fill(*r, BTN_BG);
+                        let bg = if prop_hover == Some(*pc) {
+                            BTN_HOVER
+                        } else {
+                            BTN_BG
+                        };
+                        canvas.fill(*r, bg);
                         label_center_size(
                             &mut canvas,
                             text,
                             *r,
-                            if *up { "+" } else { "-" },
+                            if *up { ">" } else { "<" },
                             UI_FONT_SIZE,
                         );
                     }
                     PropCtrl::Field(f) => {
-                        canvas.fill(*r, FIELD_BG);
+                        let bg = if prop_hover == Some(*pc) {
+                            BTN_HOVER
+                        } else {
+                            FIELD_BG
+                        };
+                        canvas.fill(*r, bg);
                         if focus == Some(*f) {
                             canvas.stroke(*r, SEL_COLOR);
                         }
@@ -3760,5 +3843,17 @@ mod tests {
         assert_eq!(parse_dim("0", 4.0, THICK_RANGE), THICK_RANGE.0); // 下限クランプ
         assert_eq!(parse_dim("", 4.0, THICK_RANGE), 4.0); // 空は現状維持
         assert_eq!(parse_dim("abc", 5.0, SIZE_RANGE), 5.0); // 不正は現状維持
+    }
+
+    #[test]
+    fn field_drag_sensitivity_covers_the_full_range_over_the_drag_distance() {
+        for field in [Field::Line, Field::Size, Field::Number, Field::Block] {
+            let (lo, hi) = field.range();
+            let end = lo + field_drag_sensitivity(field) * FIELD_DRAG_FULL_RANGE_PX;
+            assert!(
+                (end - hi).abs() < 1e-9,
+                "{field:?}: dragging the full distance should reach the range's high end"
+            );
+        }
     }
 }

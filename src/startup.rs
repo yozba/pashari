@@ -15,6 +15,14 @@ const VALUE_NAME: &str = "pashari";
 /// executable's path can't be obtained, or the registry operation fails,
 /// this is just logged and ignored.
 pub fn set_enabled(enabled: bool) {
+    // A debug build has no `windows_subsystem = "windows"` (see main.rs),
+    // so registering its path would leave a console window open on every
+    // login. Leave the registry untouched rather than either writing a
+    // debug path or deleting a legitimate release registration just
+    // because a debug session happens to run with this setting on.
+    if enabled && cfg!(debug_assertions) {
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else {
         eprintln!("スタートアップ設定に失敗: 実行ファイルのパスが取得できません");
         return;

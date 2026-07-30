@@ -548,15 +548,14 @@ impl SolidWindow {
     fn redraw(&mut self) {
         if let Ok(mut buf) = self.surface.buffer_mut() {
             buf.fill(self.color);
-            let _ = buf.present();
-            // Same reasoning as `Overlay::draw()`'s own `DwmFlush` call:
-            // this window's position/size changes on every cursor move
-            // while dragging a selection edge, so without waiting for the
-            // vblank here too, the border can visibly tear right where
-            // it's most noticeable — the selection outline itself.
+            // Waits for the vblank before blitting, same ordering and
+            // reasoning as `Overlay::draw()`'s own `DwmFlush` call — this
+            // window's position/size changes on every cursor move while
+            // adjusting the region, so the strip tears without it.
             // SAFETY: a DWM global function call taking no arguments that
             // changes no other state.
             let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
+            let _ = buf.present();
         }
     }
 
@@ -1822,16 +1821,18 @@ impl Overlay {
             }
         }
 
-        let _ = buf.present();
-        // softbuffer's Windows backend uses GDI's BitBlt, which has no
-        // vsync control at all (draws immediately without waiting for the
-        // vertical blank), so redrawing the whole screen every frame
-        // while dragging a selection shows tearing. Blocking until DWM's
-        // next vertical blank aligns present timing and prevents it
-        // (DWM is always on from Windows 8 onward, so this can't fail).
+        // softbuffer's Windows backend blits with GDI's BitBlt, which has
+        // no vsync control at all — it copies wherever the scanout
+        // happens to be. Waiting here, *before* the blit, starts it right
+        // after a vblank so it finishes ahead of the beam. Flushing after
+        // presenting instead would only pace the loop: the blit would
+        // still land however long the repaint took past the vblank, which
+        // is exactly where the tear line shows up.
+        // DWM is always on from Windows 8 onward, so this can't fail.
         // SAFETY: a DWM global function call taking no arguments that
         // changes no other state.
         let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
+        let _ = buf.present();
     }
 }
 

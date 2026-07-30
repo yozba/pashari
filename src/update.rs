@@ -290,6 +290,9 @@ pub fn relaunch_portable(new_exe: &Path) -> Result<(), String> {
     let pid = std::process::id();
     std::process::Command::new(&current)
         .env(RELAUNCH_WAIT_PID_VAR, pid.to_string())
+        // Shows Settings on the new instance so the update is visibly
+        // confirmed instead of silently minimizing to the tray (see main.rs).
+        .arg("--show-settings")
         .spawn()
         .map_err(|e| format!("新しいexeの起動に失敗: {e}"))?;
     Ok(())

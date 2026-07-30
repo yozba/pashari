@@ -76,10 +76,13 @@ pub struct App {
     shot_session: Option<Overlay>,
     /// The settings screen (`Some` if open).
     settings: Option<Settings>,
+    /// Set from the `--show-settings` arg (see main.rs) — shows Settings
+    /// once on the first `resumed`, then is left `false`.
+    show_settings_on_launch: bool,
 }
 
 impl App {
-    pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn new(proxy: EventLoopProxy<UserEvent>, show_settings_on_launch: bool) -> Self {
         Self {
             hotkey_manager: None,
             current_hotkeys: vec![HotKey::new(
@@ -96,6 +99,7 @@ impl App {
             session: None,
             shot_session: None,
             settings: None,
+            show_settings_on_launch,
         }
     }
 
@@ -438,6 +442,10 @@ impl ApplicationHandler<UserEvent> for App {
             // Listening unconditionally, independent of focus, avoids that.
             event_loop.listen_device_events(DeviceEvents::Always);
             self.init();
+            if self.show_settings_on_launch {
+                self.show_settings_on_launch = false;
+                self.open_settings(event_loop);
+            }
         }
     }
 

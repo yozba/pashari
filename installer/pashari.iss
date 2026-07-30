@@ -66,5 +66,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 [Run]
 ; skipifsilent を付けない: アプリ内自動更新はサイレントインストール
 ; （/VERYSILENT）でこのインストーラを呼ぶので、更新後に自動起動する
-; にはここで再起動させる必要がある。
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall
+; にはここで再起動させる必要がある。--show-settings は起動時に
+; Settings を表示させるフラグ（src/main.rs）——トレイに最小化したまま
+; だと更新が完了したかどうか分かりづらいため。
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--show-settings"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall

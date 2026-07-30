@@ -49,7 +49,7 @@ use crate::store::UploaderProfile;
 use crate::ui::text::TextRenderer;
 use crate::ui::{Canvas, PickerPart, Rect};
 use crate::update::ReleaseInfo;
-use general::UpdateCheckStatus;
+use about::UpdateCheckStatus;
 use hotkeys_tab::{HOTKEY_ROWS, LocalAction, build_hotkey, hotkey_content_height, hotkey_viewport};
 use text_field::{
     TextCursor, apply_common_edit_key, byte_index_for_char_count, char_index_for_x,
@@ -765,7 +765,7 @@ impl Settings {
             Tab::Editor => v.extend(self.buttons_editor()),
             Tab::Upload => v.extend(self.buttons_upload(sw)),
             Tab::Hotkeys => v.extend(self.buttons_hotkeys(sw, sh)),
-            Tab::About => v.extend(about::buttons_about(self.text.as_ref())),
+            Tab::About => v.extend(self.buttons_about()),
         }
 
         v.push((
@@ -1248,10 +1248,7 @@ impl Settings {
             Btn::SessionLimitField | Btn::SessionLimitStep(_) | Btn::BrowseEditor => {
                 self.activate_editor(btn)
             }
-            Btn::FilenameFormatField
-            | Btn::CheckForUpdates
-            | Btn::DownloadUpdate
-            | Btn::LaunchAtStartup => self.activate_general(btn),
+            Btn::FilenameFormatField | Btn::LaunchAtStartup => self.activate_general(btn),
             Btn::MaxResolutionField(_)
             | Btn::BitrateDropdown
             | Btn::BitrateOption(_)
@@ -1282,10 +1279,7 @@ impl Settings {
                 self.request_redraw();
                 None
             }
-            Btn::ReportBug => {
-                crate::shell::open_url(&about::bug_report_url());
-                None
-            }
+            Btn::ReportBug | Btn::CheckForUpdates | Btn::DownloadUpdate => self.activate_about(btn),
             Btn::SelectUploader(_)
             | Btn::DeleteUploader(_)
             | Btn::ToggleUploaderEnabled(_)
@@ -1545,11 +1539,6 @@ impl Settings {
                     filename_format_focus,
                     &filename_format_buf,
                     filename_format_cursor,
-                    text,
-                    &update_available,
-                    update_check_status,
-                    updating,
-                    &update_install_error,
                     launch_at_startup,
                 ),
                 Tab::Capture => capture_tab::draw_capture(&mut canvas, t, dark, sw, &save_dirs),
@@ -1637,6 +1626,10 @@ impl Settings {
                     sh,
                     about_scroll,
                     scrollbar_active,
+                    &update_available,
+                    update_check_status,
+                    updating,
+                    &update_install_error,
                 ),
             }
 

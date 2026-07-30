@@ -39,6 +39,12 @@ fn main() {
         return;
     }
 
+    // Set by `update::relaunch_portable`/the installer's post-install
+    // `[Run]` line (see `installer/pashari.iss`) so the just-updated
+    // instance shows Settings instead of silently minimizing to the tray
+    // — otherwise there's no visible confirmation the update finished.
+    let show_settings_on_launch = std::env::args().any(|a| a == "--show-settings");
+
     // Prevents duplicate launches of the resident app. If already
     // running, sends it a signal to show Settings and exits immediately.
     if single_instance::acquire_or_notify() {
@@ -70,7 +76,7 @@ fn main() {
 
     // The update-check background thread also returns its result via
     // this same proxy (App holds it and clones it when needed).
-    let mut app = app::App::new(proxy);
+    let mut app = app::App::new(proxy, show_settings_on_launch);
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("error: {e}");
         std::process::exit(1);
