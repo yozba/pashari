@@ -42,17 +42,20 @@ pub enum MenuButton {
     EditExternal,
     /// A visible vertical line between buttons — layout-only, not an
     /// action (no hotkey, never disabled, absorbs clicks without firing
-    /// anything). Unlike every other variant, more than one can appear in
+    /// anything). Unlike most other variants, more than one can appear in
     /// `Config::menu_buttons` at once (see `repeatable`).
     Divider,
+    /// Like `Divider`, but transparent — just opens up space between the
+    /// buttons on either side, same width as `Divider`. Also repeatable.
+    Spacer,
 }
 
 impl MenuButton {
     /// Every item that can appear in the menu, in a fixed canonical order
     /// (used to fill the settings GUI's "available" pool with anything not
-    /// in the saved/visible list — see `repeatable` for why `Divider`
-    /// always stays in that pool regardless of how many are shown).
-    pub const ALL: [MenuButton; 14] = [
+    /// in the saved/visible list — see `repeatable` for why `Divider`/
+    /// `Spacer` always stay in that pool regardless of how many are shown).
+    pub const ALL: [MenuButton; 15] = [
         Self::SizeAspect,
         Self::Save,
         Self::Copy,
@@ -67,16 +70,17 @@ impl MenuButton {
         Self::SaveAs,
         Self::EditExternal,
         Self::Divider,
+        Self::Spacer,
     ];
 
     /// Whether more than one of this item can be shown at once. Everything
-    /// except `Divider` is a singleton — added to the menu at most once,
-    /// so placing it removes it from the "available" pool and removing it
-    /// returns it there. `Divider` instead always stays available (it's a
-    /// layout aid, not a distinct action), and each placed copy is its own
-    /// independent instance.
+    /// except `Divider`/`Spacer` is a singleton — added to the menu at
+    /// most once, so placing it removes it from the "available" pool and
+    /// removing it returns it there. `Divider`/`Spacer` instead always
+    /// stay available (they're layout aids, not distinct actions), and
+    /// each placed copy is its own independent instance.
     pub fn repeatable(self) -> bool {
-        matches!(self, Self::Divider)
+        matches!(self, Self::Divider | Self::Spacer)
     }
 
     /// The default *visible* set — the menu's original fixed layout, before
@@ -112,6 +116,7 @@ impl MenuButton {
             Self::SaveAs => "Save As",
             Self::EditExternal => "Edit Ext",
             Self::Divider => "Divider",
+            Self::Spacer => "Spacer",
         }
     }
 
@@ -133,6 +138,7 @@ impl MenuButton {
             Self::SaveAs => "save_as",
             Self::EditExternal => "edit_external",
             Self::Divider => "divider",
+            Self::Spacer => "spacer",
         }
     }
 }
@@ -553,12 +559,13 @@ mod tests {
             MenuButton::DEFAULT_VISIBLE.to_vec()
         );
         // Round-trips one of the new (non-default-visible) variants too,
-        // including *multiple* dividers (the only repeatable variant).
+        // including *multiple* dividers/spacers (the repeatable variants).
         let cfg = Config {
             menu_buttons: vec![
                 MenuButton::Quit,
                 MenuButton::Divider,
                 MenuButton::Save,
+                MenuButton::Spacer,
                 MenuButton::Divider,
                 MenuButton::Undo,
             ],
@@ -572,10 +579,19 @@ mod tests {
                 MenuButton::Quit,
                 MenuButton::Divider,
                 MenuButton::Save,
+                MenuButton::Spacer,
                 MenuButton::Divider,
                 MenuButton::Undo,
             ]
         );
+    }
+
+    #[test]
+    fn only_divider_and_spacer_are_repeatable() {
+        for b in MenuButton::ALL {
+            let expected = matches!(b, MenuButton::Divider | MenuButton::Spacer);
+            assert_eq!(b.repeatable(), expected, "{b:?}");
+        }
     }
 
     #[test]

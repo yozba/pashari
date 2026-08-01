@@ -35,24 +35,25 @@ const STARTUP_ROW_Y: usize =
 /// drag in). Dragging a chip within Shown reorders it; dragging it to
 /// Available removes it. No checkbox — which row a chip is in *is* its
 /// visibility. Each chip is drawn as a square, same as the real menu's
-/// buttons (`draw_icon_button`), with its label below — except `Divider`,
-/// which draws as the same thin line it is in the real menu.
+/// buttons (`draw_icon_button`), with its label below — except `Divider`
+/// (drawn as the thin line it actually is) and `Spacer` (a same-width
+/// transparent gap, drawn as just a bare fill with no line/label).
 ///
-/// `Divider` is the one repeatable item (`MenuButton::repeatable`): its
-/// Available chip is a permanent template, not consumed when dragged in,
-/// and `Settings::menu_buttons_shown` can hold any number of independent
-/// copies of it. Every other item is a singleton, so a plain `MenuButton`
-/// value is enough to identify it — but with duplicates possible, a
-/// specific *chip* (for drag/hover) has to be identified by more than its
-/// value; see `MenuChipRef`.
+/// `Divider`/`Spacer` are the repeatable items (`MenuButton::repeatable`):
+/// their Available chips are permanent templates, not consumed when
+/// dragged in, and `Settings::menu_buttons_shown` can hold any number of
+/// independent copies of either. Every other item is a singleton, so a
+/// plain `MenuButton` value is enough to identify it — but with duplicates
+/// possible, a specific *chip* (for drag/hover) has to be identified by
+/// more than its value; see `MenuChipRef`.
 const MENU_BUTTONS_HEADER_Y: usize = next_row_y_with_extra_gap(STARTUP_ROW_Y, 30, 20);
 /// Mirrors `overlay::ACTION_BTN` (not importable here — `pub(super)` to
 /// `overlay`, and DPI-scaled there besides) so a chip is the same size as
 /// the real menu's square buttons.
 const CHIP_SIZE: usize = 56;
-/// Divider chip width — mirrors `overlay::menu`'s halved-relative-to-a-
-/// button divider width, so this layout UI looks like what capture mode
-/// actually shows instead of a generic square.
+/// Divider/spacer chip width — mirrors `overlay::menu`'s halved-relative-
+/// to-a-button divider width, so this layout UI looks like what capture
+/// mode actually shows instead of a generic square.
 const DIVIDER_CHIP_W: i64 = CHIP_SIZE as i64 / 6;
 const CHIP_GAP: i64 = 8;
 const CHIP_LINE_GAP: i64 = 8;
@@ -63,10 +64,10 @@ const BLOCK_GAP: usize = 16;
 /// Width of the drop-position indicator drawn between chips while dragging.
 const INSERT_BAR_W: usize = 3;
 
-/// A chip's width: `CHIP_SIZE` for everything except `Divider`, which is
-/// narrower (see `DIVIDER_CHIP_W`).
+/// A chip's width: `CHIP_SIZE` for everything except `Divider`/`Spacer`,
+/// which are narrower (see `DIVIDER_CHIP_W`).
 fn chip_w(b: MenuButton) -> i64 {
-    if b == MenuButton::Divider {
+    if matches!(b, MenuButton::Divider | MenuButton::Spacer) {
         DIVIDER_CHIP_W
     } else {
         CHIP_SIZE as i64
@@ -131,8 +132,8 @@ fn available_chips_y0(shown: &[MenuButton], sw: usize) -> usize {
 }
 
 /// What the "Available" row shows: every singleton not already in `shown`,
-/// plus `Divider` always (it's repeatable — see the module doc). In
-/// `MenuButton::ALL`'s canonical order.
+/// plus the repeatable items (`Divider`/`Spacer`) always — see the module
+/// doc. In `MenuButton::ALL`'s canonical order.
 fn available_menu_buttons(shown: &[MenuButton]) -> Vec<MenuButton> {
     MenuButton::ALL
         .into_iter()
@@ -717,13 +718,18 @@ fn draw_menu_button_chip(
     } else {
         base
     };
-    if menu_btn == MenuButton::Divider {
-        canvas.fill(r, bg);
-        let inset = (r.height() as f64 * 0.2) as i64;
-        let cx = ((r.x0 + r.x1) / 2) as i64;
-        canvas.line(cx, r.y0 as i64 + inset, cx, r.y1 as i64 - inset, 2, fg);
-    } else {
-        draw_icon_button(canvas, r, bg, fg, menu_btn.label(), fg, t);
+    match menu_btn {
+        MenuButton::Divider => {
+            canvas.fill(r, bg);
+            let inset = (r.height() as f64 * 0.2) as i64;
+            let cx = ((r.x0 + r.x1) / 2) as i64;
+            canvas.line(cx, r.y0 as i64 + inset, cx, r.y1 as i64 - inset, 2, fg);
+        }
+        // Transparent in the real menu, so the settings chip only shows a
+        // fill (for hover/drag feedback and to stay a visible drag
+        // target) — no line, matching the "empty gap" it actually is.
+        MenuButton::Spacer => canvas.fill(r, bg),
+        _ => draw_icon_button(canvas, r, bg, fg, menu_btn.label(), fg, t),
     }
 }
 
@@ -850,6 +856,32 @@ mod tests {
         let rects = chip_rects(&items, 720, 0);
         assert!(rects[1].1.width() < rects[0].1.width());
         assert_eq!(rects[1].1.height(), CHIP_SIZE);
+    }
+
+    #[test]
+    fn chip_w_gives_spacer_the_same_width_as_divider() {
+        assert_eq!(chip_w(MenuButton::Spacer), chip_w(MenuButton::Divider));
+        assert!(chip_w(MenuButton::Spacer) < chip_w(MenuButton::Save));
+    }
+
+    #[test]
+    fn available_menu_buttons_always_includes_divider_and_spacer() {
+        let shown = [MenuButton::Divider, MenuButton::Divider, MenuButton::Spacer];
+        let available = available_menu_buttons(&shown);
+        assert_eq!(
+            available
+                .iter()
+                .filter(|b| **b == MenuButton::Divider)
+                .count(),
+            1
+        );
+        assert_eq!(
+            available
+                .iter()
+                .filter(|b| **b == MenuButton::Spacer)
+                .count(),
+            1
+        );
     }
 
     #[test]

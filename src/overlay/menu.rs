@@ -129,11 +129,13 @@ pub struct Button {
 /// One `button_order` entry, resolved to what it actually takes to lay
 /// out and draw: either the size/aspect-ratio slot (double-width, its own
 /// draw code), a regular single-width `Action` button, or a layout-only
-/// divider (narrow line, not clickable).
+/// divider/spacer (same narrow width, neither clickable — a divider draws
+/// a line on a button-colored background, a spacer draws nothing at all).
 enum MenuSlot {
     Aspect,
     Action(Action, &'static str, Vec<LocalKey>),
     Divider,
+    Spacer,
 }
 
 /// The label is always `b.label()` — one short label per `MenuButton`,
@@ -162,6 +164,7 @@ fn menu_slot(b: MenuButton, keys: &RegionKeys) -> MenuSlot {
             MenuSlot::Action(Action::EditExternal, b.label(), keys.edit_external.clone())
         }
         MenuButton::Divider => MenuSlot::Divider,
+        MenuButton::Spacer => MenuSlot::Spacer,
     }
 }
 
@@ -225,6 +228,9 @@ impl Menu {
         let margin = ((MARGIN as f64) * dpi).round() as usize;
         let aspect_btn_w = action_btn * ASPECT_BTN_SQUARES;
         let divider_w = (action_btn / DIVIDER_W_DIVISOR).max(DIVIDER_W_MIN);
+        // A spacer is exactly as wide as a divider — same footprint,
+        // transparent instead of drawing a line.
+        let spacer_w = divider_w;
 
         let slots: Vec<MenuSlot> = button_order.iter().map(|b| menu_slot(*b, keys)).collect();
         let panel_w: usize = slots
@@ -233,6 +239,7 @@ impl Menu {
                 MenuSlot::Aspect => aspect_btn_w,
                 MenuSlot::Action(..) => action_btn,
                 MenuSlot::Divider => divider_w,
+                MenuSlot::Spacer => spacer_w,
             })
             .sum();
         let panel_h = action_btn;
@@ -291,6 +298,9 @@ impl Menu {
                         y1: py + action_btn,
                     });
                     bx += divider_w;
+                }
+                MenuSlot::Spacer => {
+                    bx += spacer_w;
                 }
             }
         }
@@ -386,9 +396,11 @@ pub fn draw(
         }
     }
 
-    // Each divider: a thin vertical line centered in its slot, inset from
-    // the top/bottom so it doesn't touch the panel's edges.
+    // Each divider: a button-colored background (unlike a spacer, which
+    // stays fully transparent) with a thin vertical line centered in it,
+    // inset from the top/bottom so it doesn't touch the panel's edges.
     for r in &menu.divider_rects {
+        canvas.fill(*r, BTN_BG);
         let inset = (r.height() as f64 * DIVIDER_INSET_FRAC) as i64;
         let cx = ((r.x0 + r.x1) / 2) as i64;
         canvas.line(
@@ -628,6 +640,36 @@ mod tests {
         assert_eq!(m.divider_rects[1].x1, m.buttons[1].rect.x0);
         assert_eq!(m.buttons[1].rect.x1, m.divider_rects[2].x0);
         assert_eq!(m.rect.x1, m.divider_rects[2].x1);
+    }
+
+    #[test]
+    fn menu_layout_spacer_is_the_same_width_as_a_divider_but_transparent() {
+        let divider_order = [MenuButton::Save, MenuButton::Divider, MenuButton::Quit];
+        let spacer_order = [MenuButton::Save, MenuButton::Spacer, MenuButton::Quit];
+        let with_divider = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &divider_order,
+            &test_availability(),
+            None,
+            1.0,
+        );
+        let with_spacer = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &spacer_order,
+            &test_availability(),
+            None,
+            1.0,
+        );
+        // Same overall width (spacer reserves exactly a divider's worth of
+        // space) and Quit ends up in the same spot either way.
+        assert_eq!(with_divider.rect.x1, with_spacer.rect.x1);
+        assert_eq!(with_divider.buttons[1].rect, with_spacer.buttons[1].rect);
+        // But a spacer has no rect to draw a line in (transparent).
+        assert!(with_spacer.divider_rects.is_empty());
     }
 
     #[test]
