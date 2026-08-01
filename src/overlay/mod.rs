@@ -95,12 +95,22 @@ pub enum Action {
     Save,
     Copy,
     Edit,
-    /// Hand off to an external editor (Shift+E; hotkey-only, no button).
+    /// Hand off to an external editor (Shift+E; no-op if unset).
     EditExternal,
     Upload,
     Record,
     /// Discards the selection and ends the capture session (same as Esc).
     Quit,
+    /// Reverts to the previous selection state; doesn't end the session.
+    Undo,
+    /// Re-applies a state undone by `Undo`; doesn't end the session.
+    Redo,
+    /// Sets the last-used region as the selection; doesn't end the session.
+    ReuseRegion,
+    /// Clears the selection to redraw it; doesn't end the session.
+    ClearSelection,
+    /// Saves via a "save as" dialog; doesn't end the session on cancel.
+    SaveAs,
 }
 
 /// The overlay's result.
@@ -752,7 +762,14 @@ impl Overlay {
             x1: sw,
             y1: sh,
         };
-        let uploaders_configured = !crate::store::enabled_uploaders().is_empty();
+        let button_order = crate::store::menu_button_order();
+        let avail = menu::MenuAvailability {
+            uploaders: !crate::store::enabled_uploaders().is_empty(),
+            external_editor: crate::store::external_editor().is_some(),
+            undo: !self.undo_stack.is_empty(),
+            redo: !self.redo_stack.is_empty(),
+            reuse_region: last_region().is_some(),
+        };
         self.menu = self.selection.map(|sel| {
             let bounds = containing_monitor(&self.frozen.monitors, sel, canvas);
             // Looked up per-monitor (not a single window-wide DPI): this
@@ -766,8 +783,9 @@ impl Overlay {
             menu::Menu::layout(
                 sel,
                 bounds,
-                &self.keys.menu,
-                uploaders_configured,
+                &self.keys,
+                &button_order,
+                &avail,
                 self.aspect_lock,
                 dpi,
             )
@@ -1059,9 +1077,11 @@ impl Overlay {
     }
 
     /// Commits an action. Record transitions to recording setup, Quit
-    /// discards the selection and ends the session, and everything else
-    /// (Save/Copy/Edit/Upload) crops the still image and ends the
-    /// session, leaving save/copy/editor-launch/upload to the caller (App).
+    /// discards the selection and ends the session, Undo/Redo/ReuseRegion/
+    /// ClearSelection/SaveAs adjust the selection state without ending the
+    /// session (same as their hotkey-only equivalents), and everything else
+    /// (Save/Copy/Edit/EditExternal/Upload) crops the still image and ends
+    /// the session, leaving save/copy/editor-launch/upload to the caller (App).
     fn trigger(&mut self, action: Action, event_loop: &ActiveEventLoop) {
         match action {
             Action::Record => {
@@ -1075,6 +1095,26 @@ impl Overlay {
             }
             Action::Quit => {
                 self.finish();
+                return;
+            }
+            Action::Undo => {
+                self.undo();
+                return;
+            }
+            Action::Redo => {
+                self.redo();
+                return;
+            }
+            Action::ReuseRegion => {
+                self.use_previous_region();
+                return;
+            }
+            Action::ClearSelection => {
+                self.clear_selection();
+                return;
+            }
+            Action::SaveAs => {
+                self.save_as();
                 return;
             }
             _ => {}
@@ -2840,7 +2880,8 @@ impl Overlay {
                                 let (cx, cy) = self.cursor_px();
                                 if self.aspect_dropdown_open {
                                     self.aspect_dropdown_open = false;
-                                    if let Some(i) = menu::aspect_option_hit(m.aspect_rect, cx, cy)
+                                    if let Some(ar) = m.aspect_rect
+                                        && let Some(i) = menu::aspect_option_hit(ar, cx, cy)
                                     {
                                         let preset = menu::ASPECT_PRESETS[i];
                                         self.aspect_lock = preset;
@@ -2854,8 +2895,15 @@ impl Overlay {
                                     self.request_redraw();
                                     return;
                                 }
-                                let ar = m.aspect_rect;
-                                if cx >= ar.x0 && cx < ar.x1 && cy >= ar.y0 && cy < ar.y1 {
+                                // `aspect_rect` is `None` when the
+                                // size/aspect button is hidden via the
+                                // General tab's menu layout customization.
+                                if let Some(ar) = m.aspect_rect
+                                    && cx >= ar.x0
+                                    && cx < ar.x1
+                                    && cy >= ar.y0
+                                    && cy < ar.y1
+                                {
                                     self.aspect_dropdown_open = true;
                                     self.request_redraw();
                                     return;

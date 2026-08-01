@@ -4,14 +4,15 @@
 //! Layout and hit-testing are separated out as OS-independent pure logic,
 //! unit-tested directly. Drawing writes straight to the softbuffer buffer.
 
-use super::{ACTION_BTN, Action};
+use super::{ACTION_BTN, Action, RegionKeys};
 use crate::localkey::LocalKey;
+use crate::store::MenuButton;
 use crate::ui::text::TextRenderer;
 use crate::ui::{Canvas, Rect, draw_icon_button};
 
-/// Key bindings for the menu's 6 buttons (changeable via the settings
-/// GUI's Hotkeys tab). Since an action can have multiple keys, each is
-/// kept as a `Vec` (empty = unbound).
+/// Key bindings for the menu's 6 original buttons (changeable via the
+/// settings GUI's Hotkeys tab). Since an action can have multiple keys,
+/// each is kept as a `Vec` (empty = unbound).
 #[derive(Clone)]
 pub(super) struct MenuKeys {
     pub save: Vec<LocalKey>,
@@ -22,9 +23,31 @@ pub(super) struct MenuKeys {
     pub quit: Vec<LocalKey>,
 }
 
-/// Number of action buttons (Save/Copy/Edit/Upload/Video/Quit — not
-/// counting the combined size/aspect-ratio button to their left).
-const N: usize = 6;
+/// Which of the menu's action buttons are currently usable — computed by
+/// the caller (`Overlay::build_menu`) from state `Menu::layout` doesn't
+/// otherwise have access to (uploader config, undo/redo history, external
+/// editor config, last region). An action with no applicable condition
+/// (e.g. `Save`) is just never disabled.
+pub(super) struct MenuAvailability {
+    pub uploaders: bool,
+    pub external_editor: bool,
+    pub undo: bool,
+    pub redo: bool,
+    pub reuse_region: bool,
+}
+
+/// Whether `action`'s button should be disabled, given `avail`.
+fn action_disabled(action: Action, avail: &MenuAvailability) -> bool {
+    match action {
+        Action::Upload => !avail.uploaders,
+        Action::EditExternal => !avail.external_editor,
+        Action::Undo => !avail.undo,
+        Action::Redo => !avail.redo,
+        Action::ReuseRegion => !avail.reuse_region,
+        _ => false,
+    }
+}
+
 /// Gap between the selection outline and the menu.
 const MARGIN: usize = 10;
 /// Width of the combined size/aspect-ratio button, in `ACTION_BTN`
@@ -94,31 +117,72 @@ pub struct Button {
     pub disabled: bool,
 }
 
-/// A menu with a fixed `N` action buttons, plus one more square button to
-/// their left combining the selection's pixel size and the aspect-ratio
-/// dropdown (same size as the rest, so the row reads as one uniform set
-/// of squares). No frame is drawn around any of them (each stands alone).
+/// One `button_order` entry, resolved to what it actually takes to lay
+/// out and draw: either the size/aspect-ratio slot (double-width, its own
+/// draw code) or a regular single-width `Action` button.
+enum MenuSlot {
+    Aspect,
+    Action(Action, &'static str, Vec<LocalKey>),
+}
+
+/// The label is always `b.label()` — one short label per `MenuButton`,
+/// shared with the settings GUI's chips (`store::MenuButton::label`'s doc).
+fn menu_slot(b: MenuButton, keys: &RegionKeys) -> MenuSlot {
+    match b {
+        MenuButton::SizeAspect => MenuSlot::Aspect,
+        MenuButton::Save => MenuSlot::Action(Action::Save, b.label(), keys.menu.save.clone()),
+        MenuButton::Copy => MenuSlot::Action(Action::Copy, b.label(), keys.menu.copy.clone()),
+        MenuButton::Edit => MenuSlot::Action(Action::Edit, b.label(), keys.menu.edit.clone()),
+        MenuButton::Upload => MenuSlot::Action(Action::Upload, b.label(), keys.menu.upload.clone()),
+        MenuButton::Video => MenuSlot::Action(Action::Record, b.label(), keys.menu.record.clone()),
+        MenuButton::Quit => MenuSlot::Action(Action::Quit, b.label(), keys.menu.quit.clone()),
+        MenuButton::Undo => MenuSlot::Action(Action::Undo, b.label(), keys.undo.clone()),
+        MenuButton::Redo => MenuSlot::Action(Action::Redo, b.label(), keys.redo.clone()),
+        MenuButton::ReuseRegion => {
+            MenuSlot::Action(Action::ReuseRegion, b.label(), keys.reuse_region.clone())
+        }
+        MenuButton::ClearSelection => MenuSlot::Action(
+            Action::ClearSelection,
+            b.label(),
+            keys.clear_selection.clone(),
+        ),
+        MenuButton::SaveAs => MenuSlot::Action(Action::SaveAs, b.label(), keys.save_as.clone()),
+        MenuButton::EditExternal => {
+            MenuSlot::Action(Action::EditExternal, b.label(), keys.edit_external.clone())
+        }
+    }
+}
+
+/// A menu built from a caller-supplied, possibly-customized
+/// `button_order` (settings GUI's General tab): a variable number of
+/// single-width action buttons, plus — if included — one double-width
+/// button combining the selection's pixel size and the aspect-ratio
+/// dropdown, wherever it falls in that order. No frame is drawn around
+/// any of them (each stands alone).
 #[derive(Clone)]
 pub struct Menu {
-    pub buttons: [Button; N],
+    pub buttons: Vec<Button>,
     /// The selection's size as "W x H", precomputed so `draw` doesn't
     /// need the selection rect too.
     pub size_label: String,
     /// The aspect-ratio dropdown's current state ("Free", "1:1", ...).
     pub aspect_label: String,
-    /// The combined size/aspect-ratio button, left of `buttons[0]`.
-    pub aspect_rect: Rect,
+    /// The combined size/aspect-ratio button's rect, if `button_order`
+    /// included it (`None` means it's hidden — no button, no dropdown).
+    pub aspect_rect: Option<Rect>,
 }
 
 impl Menu {
-    /// Places the menu near selection rect `sel` (surface coordinates).
-    /// Below if there's room, else above, else clamped within `bounds`
-    /// (the monitor showing the selection). The caller passes the actual
-    /// monitor's rect rather than clamping to the whole composited
-    /// canvas, since with mismatched monitor heights/layouts that could
-    /// place it somewhere belonging to no monitor. Disables the Upload
-    /// button if `uploaders_configured` is false, so pressing it with no
-    /// uploader configured doesn't just silently do nothing.
+    /// Places the menu near selection rect `sel` (surface coordinates),
+    /// laying out `button_order` left to right (customizable via the
+    /// settings GUI; see `MenuSlot`/`menu_slot`). Below if there's room,
+    /// else above, else clamped within `bounds` (the monitor showing the
+    /// selection). The caller passes the actual monitor's rect rather
+    /// than clamping to the whole composited canvas, since with
+    /// mismatched monitor heights/layouts that could place it somewhere
+    /// belonging to no monitor. Disables buttons whose action isn't
+    /// currently usable per `avail` (e.g. Upload with no uploader
+    /// configured), so pressing one doesn't just silently do nothing.
     ///
     /// `dpi` scales the button/gap size (`ACTION_BTN`/`MARGIN`) directly,
     /// unlike the rest of this window's drawing — everything else here
@@ -131,28 +195,24 @@ impl Menu {
     pub(super) fn layout(
         sel: Rect,
         bounds: Rect,
-        keys: &MenuKeys,
-        uploaders_configured: bool,
+        keys: &RegionKeys,
+        button_order: &[MenuButton],
+        avail: &MenuAvailability,
         aspect_lock: Option<(u32, u32)>,
         dpi: f64,
     ) -> Self {
         let action_btn = ((ACTION_BTN as f64) * dpi).round() as usize;
         let margin = ((MARGIN as f64) * dpi).round() as usize;
-
-        // (Action, label, keys, gap from the previous button). All gaps
-        // are currently 0 (packed together); to space out a specific
-        // button later, just change its value here.
-        let specs = [
-            (Action::Save, "Save", keys.save.clone(), 0usize),
-            (Action::Copy, "Copy", keys.copy.clone(), 0),
-            (Action::Edit, "Edit", keys.edit.clone(), 0),
-            (Action::Upload, "Upload", keys.upload.clone(), 0),
-            (Action::Record, "Video", keys.record.clone(), 0),
-            (Action::Quit, "Quit", keys.quit.clone(), 0),
-        ];
-        let total_gap: usize = specs.iter().map(|(.., g)| g).sum();
         let aspect_btn_w = action_btn * ASPECT_BTN_SQUARES;
-        let panel_w = action_btn * N + aspect_btn_w + total_gap;
+
+        let slots: Vec<MenuSlot> = button_order.iter().map(|b| menu_slot(*b, keys)).collect();
+        let panel_w: usize = slots
+            .iter()
+            .map(|s| match s {
+                MenuSlot::Aspect => aspect_btn_w,
+                MenuSlot::Action(..) => action_btn,
+            })
+            .sum();
         let panel_h = action_btn;
 
         // Horizontal position: centered on the selection, clamped within bounds.
@@ -171,44 +231,36 @@ impl Menu {
             bounds.y1.saturating_sub(panel_h).max(bounds.y0)
         };
 
-        let panel = Rect {
-            x0: px,
-            y0: py,
-            x1: px + panel_w,
-            y1: py + panel_h,
-        };
-        let aspect_rect = Rect {
-            x0: px,
-            y0: py,
-            x1: px + aspect_btn_w,
-            y1: py + action_btn,
-        };
-
-        let mut buttons: [Button; N] = std::array::from_fn(|_| Button {
-            rect: panel,
-            action: Action::Save,
-            label: "",
-            hotkeys: Vec::new(),
-            disabled: false,
-        });
-        let mut bx = px + aspect_btn_w;
-        for (i, (action, label, hotkeys, gap_before)) in specs.into_iter().enumerate() {
-            if i > 0 {
-                bx += gap_before;
+        let mut aspect_rect = None;
+        let mut buttons = Vec::with_capacity(slots.len());
+        let mut bx = px;
+        for slot in slots {
+            match slot {
+                MenuSlot::Aspect => {
+                    aspect_rect = Some(Rect {
+                        x0: bx,
+                        y0: py,
+                        x1: bx + aspect_btn_w,
+                        y1: py + action_btn,
+                    });
+                    bx += aspect_btn_w;
+                }
+                MenuSlot::Action(action, label, hotkeys) => {
+                    buttons.push(Button {
+                        rect: Rect {
+                            x0: bx,
+                            y0: py,
+                            x1: bx + action_btn,
+                            y1: py + action_btn,
+                        },
+                        disabled: action_disabled(action, avail),
+                        action,
+                        label,
+                        hotkeys,
+                    });
+                    bx += action_btn;
+                }
             }
-            buttons[i] = Button {
-                rect: Rect {
-                    x0: bx,
-                    y0: py,
-                    x1: bx + action_btn,
-                    y1: py + action_btn,
-                },
-                disabled: matches!(action, Action::Upload) && !uploaders_configured,
-                action,
-                label,
-                hotkeys,
-            };
-            bx += action_btn;
         }
 
         Self {
@@ -246,34 +298,36 @@ pub fn draw(
 ) {
     // The combined size/aspect-ratio button: same square as the other
     // buttons, with two centered lines (size on top, ratio state below)
-    // instead of an icon+label.
-    canvas.fill(menu.aspect_rect, BTN_BG);
-    if let Some(t) = text {
-        let r = menu.aspect_rect;
-        let top_cy = r.y0 as f32 + r.height() as f32 * 0.3;
-        let bottom_cy = r.y0 as f32 + r.height() as f32 * 0.72;
-        let tw = t.text_width(&menu.size_label, ASPECT_BTN_FONT);
-        let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
-        let baseline = t.baseline_for_center(top_cy, ASPECT_BTN_FONT);
-        t.draw(
-            canvas,
-            lx,
-            baseline,
-            &menu.size_label,
-            ASPECT_BTN_FONT,
-            TEXT_COLOR,
-        );
-        let tw = t.text_width(&menu.aspect_label, ASPECT_BTN_FONT);
-        let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
-        let baseline = t.baseline_for_center(bottom_cy, ASPECT_BTN_FONT);
-        t.draw(
-            canvas,
-            lx,
-            baseline,
-            &menu.aspect_label,
-            ASPECT_BTN_FONT,
-            TEXT_COLOR,
-        );
+    // instead of an icon+label. `None` means it's hidden (`button_order`
+    // didn't include it) — nothing to draw.
+    if let Some(r) = menu.aspect_rect {
+        canvas.fill(r, BTN_BG);
+        if let Some(t) = text {
+            let top_cy = r.y0 as f32 + r.height() as f32 * 0.3;
+            let bottom_cy = r.y0 as f32 + r.height() as f32 * 0.72;
+            let tw = t.text_width(&menu.size_label, ASPECT_BTN_FONT);
+            let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
+            let baseline = t.baseline_for_center(top_cy, ASPECT_BTN_FONT);
+            t.draw(
+                canvas,
+                lx,
+                baseline,
+                &menu.size_label,
+                ASPECT_BTN_FONT,
+                TEXT_COLOR,
+            );
+            let tw = t.text_width(&menu.aspect_label, ASPECT_BTN_FONT);
+            let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
+            let baseline = t.baseline_for_center(bottom_cy, ASPECT_BTN_FONT);
+            t.draw(
+                canvas,
+                lx,
+                baseline,
+                &menu.aspect_label,
+                ASPECT_BTN_FONT,
+                TEXT_COLOR,
+            );
+        }
     }
 
     for (i, btn) in menu.buttons.iter().enumerate() {
@@ -295,11 +349,10 @@ pub fn draw(
 
     // Drawn last so the open option list sits on top of the size label
     // and buttons it overlaps, instead of being painted over by them.
-    if aspect_dropdown_open {
-        for (rect, preset) in aspect_option_rects(menu.aspect_rect)
-            .into_iter()
-            .zip(ASPECT_PRESETS)
-        {
+    if let Some(r) = menu.aspect_rect
+        && aspect_dropdown_open
+    {
+        for (rect, preset) in aspect_option_rects(r).into_iter().zip(ASPECT_PRESETS) {
             let selected = preset == aspect_lock;
             canvas.fill(rect, if selected { BTN_PRESSED } else { BTN_HOVER });
             if let Some(t) = text {
@@ -343,13 +396,55 @@ mod tests {
         }
     }
 
+    /// `RegionKeys` wrapping `test_keys()`, with the non-menu hotkeys
+    /// unbound (empty) — good enough for layout tests, which don't assert
+    /// on those.
+    fn test_region_keys() -> RegionKeys {
+        RegionKeys {
+            undo: vec![],
+            redo: vec![],
+            reuse_region: vec![],
+            clear_selection: vec![],
+            save_as: vec![],
+            edit_external: vec![],
+            menu: test_keys(),
+        }
+    }
+
+    /// Nothing disabled — the common case for layout tests that aren't
+    /// specifically exercising `disabled`.
+    fn test_availability() -> MenuAvailability {
+        MenuAvailability {
+            uploaders: true,
+            external_editor: true,
+            undo: true,
+            redo: true,
+            reuse_region: true,
+        }
+    }
+
+    /// The menu's original fixed layout (before button customization),
+    /// used by tests that assert on a specific 6-action-button shape.
+    fn default_visible_order() -> [MenuButton; 7] {
+        [
+            MenuButton::SizeAspect,
+            MenuButton::Save,
+            MenuButton::Copy,
+            MenuButton::Edit,
+            MenuButton::Upload,
+            MenuButton::Video,
+            MenuButton::Quit,
+        ]
+    }
+
     #[test]
     fn menu_shows_a_combined_size_and_aspect_button_left_of_the_action_buttons() {
         let m = Menu::layout(
             sel(100, 100, 100 + 1280, 100 + 720),
             full_hd(),
-            &test_keys(),
-            true,
+            &test_region_keys(),
+            &MenuButton::ALL,
+            &test_availability(),
             Some((16, 9)),
             1.0,
         );
@@ -357,10 +452,11 @@ mod tests {
         assert_eq!(m.aspect_label, "16:9");
         // Twice as wide as one action-button square, same height, sitting
         // directly left of Save.
-        assert_eq!(m.aspect_rect.width(), m.buttons[0].rect.width() * 2);
-        assert_eq!(m.aspect_rect.height(), m.buttons[0].rect.height());
-        assert_eq!(m.aspect_rect.x1, m.buttons[0].rect.x0);
-        assert_eq!(m.aspect_rect.y0, m.buttons[0].rect.y0);
+        let ar = m.aspect_rect.expect("MenuButton::ALL includes SizeAspect");
+        assert_eq!(ar.width(), m.buttons[0].rect.width() * 2);
+        assert_eq!(ar.height(), m.buttons[0].rect.height());
+        assert_eq!(ar.x1, m.buttons[0].rect.x0);
+        assert_eq!(ar.y0, m.buttons[0].rect.y0);
     }
 
     #[test]
@@ -368,15 +464,63 @@ mod tests {
         let m = Menu::layout(
             sel(1000, 100, 1200, 200), // 200px wide, centered at x=1100.
             full_hd(),
-            &test_keys(),
-            true,
+            &test_region_keys(),
+            &MenuButton::ALL,
+            &test_availability(),
             None,
             1.0,
         );
-        let panel_x0 = m.aspect_rect.x0;
+        let panel_x0 = m
+            .aspect_rect
+            .expect("MenuButton::ALL includes SizeAspect")
+            .x0;
         let panel_x1 = m.buttons[m.buttons.len() - 1].rect.x1;
         let panel_center = (panel_x0 + panel_x1) / 2;
         assert_eq!(panel_center, 1100);
+    }
+
+    #[test]
+    fn menu_layout_excludes_hidden_buttons_and_uses_the_given_order() {
+        // Only Quit, Save, then the size/aspect button — in that order,
+        // and skipping Copy/Edit/Upload/Video entirely.
+        let order = [MenuButton::Quit, MenuButton::Save, MenuButton::SizeAspect];
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &order,
+            &test_availability(),
+            None,
+            1.0,
+        );
+        assert_eq!(m.buttons.len(), 2);
+        assert!(matches!(m.buttons[0].action, Action::Quit));
+        assert!(matches!(m.buttons[1].action, Action::Save));
+        // The aspect button comes after both action buttons in this order,
+        // not pinned to the left.
+        let ar = m.aspect_rect.expect("order includes SizeAspect");
+        assert_eq!(ar.x0, m.buttons[1].rect.x1);
+    }
+
+    #[test]
+    fn menu_layout_has_no_aspect_rect_when_size_aspect_is_not_in_the_order() {
+        let order = [MenuButton::Save, MenuButton::Quit];
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &order,
+            &test_availability(),
+            None,
+            1.0,
+        );
+        assert!(m.aspect_rect.is_none());
+        // The panel is exactly 2 action-button squares wide (no room
+        // reserved for the aspect button).
+        assert_eq!(
+            m.buttons[1].rect.x1 - m.buttons[0].rect.x0,
+            m.buttons[0].rect.width() * 2
+        );
     }
 
     #[test]
@@ -384,8 +528,9 @@ mod tests {
         let m = Menu::layout(
             sel(100, 100, 300, 200),
             full_hd(),
-            &test_keys(),
-            true,
+            &test_region_keys(),
+            &default_visible_order(),
+            &test_availability(),
             None,
             1.0,
         );
@@ -440,8 +585,9 @@ mod tests {
         let m = Menu::layout(
             sel(100, 1000, 300, 1080),
             full_hd(),
-            &test_keys(),
-            true,
+            &test_region_keys(),
+            &MenuButton::ALL,
+            &test_availability(),
             None,
             1.0,
         );
@@ -463,8 +609,9 @@ mod tests {
         let m = Menu::layout(
             sel(3700, 900, 3800, 990),
             bounds,
-            &test_keys(),
-            true,
+            &test_region_keys(),
+            &MenuButton::ALL,
+            &test_availability(),
             None,
             1.0,
         );
@@ -479,8 +626,9 @@ mod tests {
         let m = Menu::layout(
             sel(100, 100, 300, 200),
             full_hd(),
-            &test_keys(),
-            true,
+            &test_region_keys(),
+            &MenuButton::ALL,
+            &test_availability(),
             None,
             1.0,
         );
@@ -495,11 +643,16 @@ mod tests {
 
     #[test]
     fn upload_button_is_disabled_without_configured_uploaders_but_still_absorbs_clicks() {
+        let avail = MenuAvailability {
+            uploaders: false,
+            ..test_availability()
+        };
         let m = Menu::layout(
             sel(100, 100, 300, 200),
             full_hd(),
-            &test_keys(),
-            false,
+            &test_region_keys(),
+            &MenuButton::ALL,
+            &avail,
             None,
             1.0,
         );
@@ -513,5 +666,25 @@ mod tests {
         assert_eq!(m.hit(cx, cy), Some(3));
         // Other buttons stay enabled as usual.
         assert!(!m.buttons[0].disabled);
+    }
+
+    #[test]
+    fn edit_external_button_is_disabled_without_a_configured_external_editor() {
+        let avail = MenuAvailability {
+            external_editor: false,
+            ..test_availability()
+        };
+        let order = [MenuButton::Save, MenuButton::EditExternal];
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &order,
+            &avail,
+            None,
+            1.0,
+        );
+        assert!(!m.buttons[0].disabled);
+        assert!(m.buttons[1].disabled);
     }
 }

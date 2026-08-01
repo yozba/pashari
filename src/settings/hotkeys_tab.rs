@@ -6,7 +6,7 @@ use winit::keyboard::{KeyCode, ModifiersState};
 use super::{
     ACCENT, Btn, CONTENT_X, CaptureTarget, SCROLLBAR_THUMB, SCROLLBAR_THUMB_HOVER, Settings,
     SettingsResult, field, hover_tint_for, scrollbar_thumb_rect, stroke_top_bottom_aware,
-    theme_colors,
+    theme_colors, wrap_slots,
 };
 use crate::localkey::LocalKey;
 use crate::ui::text::TextRenderer;
@@ -379,24 +379,6 @@ fn chip_width(text: Option<&TextRenderer>, spec: &str) -> i64 {
         .map(|tr| tr.text_width(spec, CHIP_TEXT_SIZE).ceil() as i64)
         .unwrap_or(CHIP_TEXT_FALLBACK_W);
     (text_w + CHIP_PAD_X + CHIP_X_RESERVED).max(CHIP_MIN_W)
-}
-
-/// Packs `widths` left to right, wrapping to a new line once `max_w` is
-/// exceeded. Returns each element's (line, x_offset), x_offset relative to
-/// that line's left edge. A pure function, works with variable-width elements.
-fn wrap_slots(widths: &[i64], gap: i64, max_w: i64) -> Vec<(usize, i64)> {
-    let mut out = Vec::with_capacity(widths.len());
-    let mut line = 0usize;
-    let mut x = 0i64;
-    for &w in widths {
-        if x > 0 && x + w > max_w {
-            line += 1;
-            x = 0;
-        }
-        out.push((line, x));
-        x += w + gap;
-    }
-    out
 }
 
 /// Wrapped (line, x_offset, width) for `specs` (existing chips) plus a

@@ -19,6 +19,105 @@ use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+/// One of the items the region-selection action menu can show: the
+/// combined size/aspect-ratio button, or one of the region-selection
+/// actions (also usable as hotkeys — see `store::hotkeys::HotkeyConfig`).
+/// Order and membership in `Config::menu_buttons` control the menu's
+/// layout (settings GUI's General tab).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuButton {
+    SizeAspect,
+    Save,
+    Copy,
+    Edit,
+    Upload,
+    Video,
+    Quit,
+    Undo,
+    Redo,
+    ReuseRegion,
+    ClearSelection,
+    SaveAs,
+    EditExternal,
+}
+
+impl MenuButton {
+    /// Every item that can appear in the menu, in a fixed canonical order
+    /// (used to fill the settings GUI's "hidden" pool with anything not
+    /// in the saved/visible list).
+    pub const ALL: [MenuButton; 13] = [
+        Self::SizeAspect,
+        Self::Save,
+        Self::Copy,
+        Self::Edit,
+        Self::Upload,
+        Self::Video,
+        Self::Quit,
+        Self::Undo,
+        Self::Redo,
+        Self::ReuseRegion,
+        Self::ClearSelection,
+        Self::SaveAs,
+        Self::EditExternal,
+    ];
+
+    /// The default *visible* set — the menu's original fixed layout, before
+    /// this customization feature existed. The other 6 items are available
+    /// but start hidden, so a fresh install isn't cluttered with all 13.
+    const DEFAULT_VISIBLE: [MenuButton; 7] = [
+        Self::SizeAspect,
+        Self::Save,
+        Self::Copy,
+        Self::Edit,
+        Self::Upload,
+        Self::Video,
+        Self::Quit,
+    ];
+
+    /// Short label, shown both under the real menu's square buttons and on
+    /// the settings GUI's chips — must stay short enough to fit a small
+    /// square (existing labels like "Upload"/"Record" are the width budget
+    /// to stay within).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SizeAspect => "Size & Aspect Ratio",
+            Self::Save => "Save",
+            Self::Copy => "Copy",
+            Self::Edit => "Edit",
+            Self::Upload => "Upload",
+            Self::Video => "Video",
+            Self::Quit => "Quit",
+            Self::Undo => "Undo",
+            Self::Redo => "Redo",
+            Self::ReuseRegion => "Reuse",
+            Self::ClearSelection => "Reset",
+            Self::SaveAs => "Save As",
+            Self::EditExternal => "Edit Ext",
+        }
+    }
+
+    /// The `#[serde(rename_all = "snake_case")]` string this variant
+    /// (de)serializes as, for hand-writing the toml array in `render_toml`.
+    fn toml_name(self) -> &'static str {
+        match self {
+            Self::SizeAspect => "size_aspect",
+            Self::Save => "save",
+            Self::Copy => "copy",
+            Self::Edit => "edit",
+            Self::Upload => "upload",
+            Self::Video => "video",
+            Self::Quit => "quit",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+            Self::ReuseRegion => "reuse_region",
+            Self::ClearSelection => "clear_selection",
+            Self::SaveAs => "save_as",
+            Self::EditExternal => "edit_external",
+        }
+    }
+}
+
 /// The config. Unset fields fall back to defaults.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -89,6 +188,13 @@ pub struct Config {
     pub filename_format: String,
     /// The next value to use for %#n (persistent counter). Doesn't increment unless %#n is used.
     pub filename_counter: u32,
+
+    /// The region-selection action menu's buttons, in display order.
+    /// Only the *visible* ones are listed — anything from
+    /// `MenuButton::ALL` missing here is hidden (settings GUI's General
+    /// tab). No separate visibility flag, so there's nothing to default
+    /// per-item when this whole list is present but a variant isn't in it.
+    pub menu_buttons: Vec<MenuButton>,
 }
 
 impl Default for Config {
@@ -119,6 +225,7 @@ impl Default for Config {
             launch_at_startup: false,
             filename_format: "pashari_%Y-%m-%d_%H-%M-%S".into(),
             filename_counter: 1,
+            menu_buttons: MenuButton::DEFAULT_VISIBLE.to_vec(),
         }
     }
 }
@@ -171,6 +278,12 @@ pub fn enabled_uploaders() -> Vec<UploaderProfile> {
         .into_iter()
         .filter(|u| u.enabled)
         .collect()
+}
+
+/// The region-selection action menu's buttons, in display order (read
+/// fresh on every menu build, same as `enabled_uploaders`).
+pub fn menu_button_order() -> Vec<MenuButton> {
+    CONFIG.lock().unwrap().menu_buttons.clone()
 }
 
 /// Updates the config and writes it out as toml (called from the GUI's Save).
@@ -310,6 +423,10 @@ session_history_limit = {}
 last_update_check = {}
 # Windows ログイン時に自動起動するかどうか。
 launch_at_startup = {}
+
+# 領域選択メニューに表示するボタンと並び順（設定GUIの General タブから
+# 変更できます）。ここに無い項目は非表示になります。
+menu_buttons = [{}]
 "#,
         c.save_dir_png,
         c.save_dir_mp4,
@@ -340,6 +457,11 @@ launch_at_startup = {}
         c.session_history_limit,
         c.last_update_check,
         c.launch_at_startup,
+        c.menu_buttons
+            .iter()
+            .map(|b| format!("\"{}\"", b.toml_name()))
+            .collect::<Vec<_>>()
+            .join(", "),
     )
 }
 
@@ -400,6 +522,42 @@ mod tests {
                 .unwrap()
                 .record_audio_sample_rate,
             44_100
+        );
+    }
+
+    #[test]
+    fn render_toml_round_trips_menu_buttons() {
+        assert_eq!(
+            toml::from_str::<Config>(&render_toml(&Config::default()))
+                .unwrap()
+                .menu_buttons,
+            MenuButton::DEFAULT_VISIBLE.to_vec()
+        );
+        // Round-trips one of the new (non-default-visible) variants too.
+        let cfg = Config {
+            menu_buttons: vec![MenuButton::Quit, MenuButton::Save, MenuButton::Undo],
+            ..Config::default()
+        };
+        assert_eq!(
+            toml::from_str::<Config>(&render_toml(&cfg))
+                .unwrap()
+                .menu_buttons,
+            vec![MenuButton::Quit, MenuButton::Save, MenuButton::Undo]
+        );
+    }
+
+    #[test]
+    fn menu_buttons_missing_from_toml_falls_back_to_the_default_seven_button_list() {
+        let toml_without_menu_buttons = render_toml(&Config::default())
+            .lines()
+            .filter(|l| !l.starts_with("menu_buttons"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            toml::from_str::<Config>(&toml_without_menu_buttons)
+                .unwrap()
+                .menu_buttons,
+            MenuButton::DEFAULT_VISIBLE.to_vec()
         );
     }
 

@@ -310,6 +310,7 @@ impl App {
                     session_history_limit,
                     launch_at_startup,
                     filename_format,
+                    menu_buttons,
                 } = *saved;
                 let hotkeys_cfg = HotkeyConfig {
                     hotkey,
@@ -356,6 +357,7 @@ impl App {
                     session_history_limit,
                     launch_at_startup,
                     filename_format,
+                    menu_buttons,
                     ..store::snapshot()
                 };
                 self.apply_settings(cfg, hotkeys_cfg, uploaders_cfg);
@@ -597,6 +599,14 @@ fn handle_outcome(outcome: Option<Outcome>) {
             // Quit never actually reaches here, since overlay ends
             // without producing an Outcome for it (kept only for exhaustiveness).
             Action::Quit => {}
+            // Undo/Redo/ReuseRegion/ClearSelection/SaveAs never reach here
+            // either: `overlay::trigger` handles them directly and returns
+            // before producing an `Outcome::Captured` (kept only for exhaustiveness).
+            Action::Undo
+            | Action::Redo
+            | Action::ReuseRegion
+            | Action::ClearSelection
+            | Action::SaveAs => {}
         },
         Some(Outcome::Recorded(path)) => {
             println!("saved: {}", path.display());

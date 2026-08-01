@@ -45,7 +45,7 @@ use winit::window::{Theme, Window};
 
 use crate::app::UserEvent;
 use crate::localkey::LocalKey;
-use crate::store::UploaderProfile;
+use crate::store::{self, UploaderProfile};
 use crate::ui::text::TextRenderer;
 use crate::ui::{Canvas, PickerPart, Rect};
 use crate::update::ReleaseInfo;
@@ -65,6 +65,10 @@ const WIN_H: usize = 600;
 /// Width of the left vertical tab bar, and the content area's left edge x.
 const SIDEBAR_W: usize = 140;
 const CONTENT_X: usize = SIDEBAR_W + 16;
+
+/// How far the cursor has to move (px) from where a menu-button chip was
+/// pressed before it counts as a drag rather than a plain click.
+const MENU_DRAG_THRESHOLD: f64 = 4.0;
 /// Tab button height and spacing.
 const TAB_BTN_H: usize = 36;
 const TAB_BTN_GAP: usize = 6;
@@ -317,6 +321,9 @@ pub struct SavedSettings {
     pub session_history_limit: usize,
     pub launch_at_startup: bool,
     pub filename_format: String,
+    /// The region-selection action menu's buttons, in display order
+    /// (only the visible ones — see `store::Config::menu_buttons`).
+    pub menu_buttons: Vec<store::MenuButton>,
 }
 
 pub struct Settings {
@@ -347,6 +354,33 @@ pub struct Settings {
     save_dir_gif: String,
     /// "Launch at Windows startup" checkbox (General tab).
     launch_at_startup: bool,
+    /// Region-selection menu's buttons currently shown, in display order
+    /// (General tab) — this order is exactly what gets saved. Working
+    /// state, reconciled from `Config.menu_buttons` in `Settings::open`
+    /// via `reconcile_menu_buttons`.
+    menu_buttons_shown: Vec<store::MenuButton>,
+    /// The rest of `store::MenuButton::ALL`, not currently shown. Order is
+    /// UI-only (not persisted) — kept stable so chips don't jump around.
+    menu_buttons_hidden: Vec<store::MenuButton>,
+    /// A chip that's been pressed but hasn't moved far enough yet to count
+    /// as a drag (the chip, and the cursor position at press time). A
+    /// plain click (press+release without crossing `MENU_DRAG_THRESHOLD`)
+    /// never promotes this to `menu_drag`, so it does nothing — clicking a
+    /// chip isn't itself a reorder action, only actually dragging it is.
+    menu_press: Option<(store::MenuButton, (f64, f64))>,
+    /// The chip actually being dragged (movement past the threshold), if
+    /// any. Rendering doesn't otherwise change while this is `Some`; the
+    /// shown/hidden lists only update on drop.
+    menu_drag: Option<store::MenuButton>,
+    /// The chip currently under the cursor, for hover styling — updated
+    /// only by an actual `CursorMoved` (see the `WindowEvent::CursorMoved`
+    /// handler's plain, nothing-else-in-progress branch), *not*
+    /// recomputed from raw cursor position at draw time. Recomputing it
+    /// every redraw would also react to the chip *layout* moving under a
+    /// stationary cursor (e.g. right after a drop reorders things),
+    /// lighting up whatever chip the mouse happens to now sit over even
+    /// though it never actually moved there.
+    chip_hover: Option<store::MenuButton>,
     /// Path to the external editor executable; used for Shift+E if set.
     external_editor: String,
     /// "Show mouse cursor in recordings" checkbox (Video tab).
@@ -525,6 +559,20 @@ pub struct Settings {
     update_install_error: Option<String>,
 }
 
+/// Builds the General tab's menu-layout working state (shown, hidden) from
+/// the persisted, visible-only, ordered list: `shown` is `saved` as-is;
+/// `hidden` is whatever's left of `MenuButton::ALL`, in its canonical order.
+fn reconcile_menu_buttons(
+    saved: &[store::MenuButton],
+) -> (Vec<store::MenuButton>, Vec<store::MenuButton>) {
+    let shown = saved.to_vec();
+    let hidden = store::MenuButton::ALL
+        .into_iter()
+        .filter(|b| !saved.contains(b))
+        .collect();
+    (shown, hidden)
+}
+
 impl Settings {
     /// Opens the window with the current settings. `update_available`/
     /// `update_proxy` are the App's current update-check state (a display
@@ -591,6 +639,8 @@ impl Settings {
         // (the previous default look) where it can't be read.
         let dark = window.theme().map(|t| t == Theme::Dark).unwrap_or(true);
 
+        let (menu_buttons_shown, menu_buttons_hidden) = reconcile_menu_buttons(&cfg.menu_buttons);
+
         let mut this = Self {
             window: Some(window),
             _context: Some(context),
@@ -605,6 +655,11 @@ impl Settings {
             save_dir_mp4: cfg.save_dir_mp4,
             save_dir_gif: cfg.save_dir_gif,
             launch_at_startup: cfg.launch_at_startup,
+            menu_buttons_shown,
+            menu_buttons_hidden,
+            menu_press: None,
+            menu_drag: None,
+            chip_hover: None,
             external_editor: cfg.external_editor,
             record_show_cursor: cfg.record_show_cursor,
             record_bitrate_mbps: cfg.record_bitrate_mbps,
@@ -839,6 +894,21 @@ impl Settings {
                 } else if let Some(grab_offset) = self.scrollbar_drag {
                     // Follow the scrollbar-thumb drag.
                     self.update_scrollbar_drag(y, grab_offset);
+                } else if let Some((b, (px, py))) = self.menu_press {
+                    // Promote to an actual drag only once the cursor has
+                    // moved far enough — a plain click (released before
+                    // this) never reorders anything.
+                    let (dx, dy) = (x - px, y - py);
+                    if dx * dx + dy * dy >= MENU_DRAG_THRESHOLD * MENU_DRAG_THRESHOLD {
+                        self.menu_press = None;
+                        self.menu_drag = Some(b);
+                        self.request_redraw();
+                    }
+                } else if self.menu_drag.is_some() {
+                    // Follow a menu-button chip drag: redraw every move so
+                    // the live drop-position indicator tracks the cursor
+                    // (unlike a hover change, this isn't conditional).
+                    self.request_redraw();
                 } else {
                     let h = self.button_at(x as usize, y as usize);
                     if h != self.hover {
@@ -848,6 +918,21 @@ impl Settings {
                     let scrollbar_hover = self.scrollbar_hit(x, y).is_some();
                     if scrollbar_hover != self.scrollbar_hover {
                         self.scrollbar_hover = scrollbar_hover;
+                        self.request_redraw();
+                    }
+                    let chip_hover = if self.tab == Tab::General {
+                        general::menu_chip_at(
+                            &self.menu_buttons_shown,
+                            &self.menu_buttons_hidden,
+                            self.size.0,
+                            x,
+                            y,
+                        )
+                    } else {
+                        None
+                    };
+                    if chip_hover != self.chip_hover {
+                        self.chip_hover = chip_hover;
                         self.request_redraw();
                     }
                 }
@@ -1133,6 +1218,23 @@ impl Settings {
                     self.scrollbar_drag = Some(grab_offset);
                     return None;
                 }
+                // A menu-button chip (General tab): arms a possible drag,
+                // same treatment — but doesn't become a real drag
+                // (`menu_drag`) until the cursor actually moves past
+                // `MENU_DRAG_THRESHOLD` (see `CursorMoved`), so a plain
+                // click does nothing.
+                if self.tab == Tab::General
+                    && let Some(b) = general::menu_chip_at(
+                        &self.menu_buttons_shown,
+                        &self.menu_buttons_hidden,
+                        self.size.0,
+                        cx,
+                        cy,
+                    )
+                {
+                    self.menu_press = Some((b, (cx, cy)));
+                    return None;
+                }
                 // Text edit fields: place the caret at the click position.
                 // Handled directly here (bypassing `self.pressed`) so a drag
                 // can extend it into a selection, same as starting a color
@@ -1179,6 +1281,15 @@ impl Settings {
                     return None;
                 }
                 if self.scrollbar_drag.take().is_some() {
+                    return None;
+                }
+                if let Some(dragged) = self.menu_drag.take() {
+                    self.drop_menu_chip(dragged);
+                    return None;
+                }
+                if self.menu_press.take().is_some() {
+                    // A plain click on a chip (never crossed the drag
+                    // threshold) — does nothing.
                     return None;
                 }
                 if let Some(btn) = self.pressed.take()
@@ -1236,6 +1347,9 @@ impl Settings {
                 // meaningless, so stop it.
                 self.capturing = None;
                 self.hotkey_error = None;
+                // Stale otherwise: chip hover is only recomputed while on
+                // the General tab.
+                self.chip_hover = None;
                 self.request_redraw();
                 None
             }
@@ -1327,6 +1441,7 @@ impl Settings {
                 hotkey_editor_tool_number_marker: self.hotkey_editor_tool_number_marker.clone(),
                 session_history_limit: self.session_history_limit,
                 filename_format: self.filename_format.clone(),
+                menu_buttons: self.menu_buttons_shown.clone(),
             }))),
             Btn::Cancel => Some(SettingsResult::Cancelled),
         }
@@ -1348,6 +1463,11 @@ impl Settings {
         ];
         let external_editor = self.external_editor.clone();
         let launch_at_startup = self.launch_at_startup;
+        let menu_buttons_shown = self.menu_buttons_shown.clone();
+        let menu_buttons_hidden = self.menu_buttons_hidden.clone();
+        let menu_drag = self.menu_drag;
+        let chip_hover = self.chip_hover;
+        let cursor = self.cursor;
         let record_show_cursor = self.record_show_cursor;
         let record_show_click_ripple = self.record_show_click_ripple;
         let record_click_color_left = self.record_click_color_left;
@@ -1540,6 +1660,11 @@ impl Settings {
                     &filename_format_buf,
                     filename_format_cursor,
                     launch_at_startup,
+                    &menu_buttons_shown,
+                    &menu_buttons_hidden,
+                    menu_drag,
+                    chip_hover,
+                    cursor,
                 ),
                 Tab::Capture => capture_tab::draw_capture(&mut canvas, t, dark, sw, &save_dirs),
                 Tab::Video => video::draw_video(
@@ -1803,6 +1928,26 @@ fn field(x: usize, y: usize, w: usize, h: usize) -> Rect {
     }
 }
 
+/// Packs `widths` left to right, wrapping to a new line once `max_w` is
+/// exceeded. Returns each element's (line, x_offset), x_offset relative to
+/// that line's left edge. A pure function, works with variable-width
+/// elements — shared by the Hotkeys tab's key-binding chips and the
+/// General tab's menu-button chips.
+pub(super) fn wrap_slots(widths: &[i64], gap: i64, max_w: i64) -> Vec<(usize, i64)> {
+    let mut out = Vec::with_capacity(widths.len());
+    let mut line = 0usize;
+    let mut x = 0i64;
+    for &w in widths {
+        if x > 0 && x + w > max_w {
+            line += 1;
+            x = 0;
+        }
+        out.push((line, x));
+        x += w + gap;
+    }
+    out
+}
+
 /// Shrinks a rect by `n` px on each side (used for the color picker
 /// swatch's double border).
 fn inset(r: Rect, n: usize) -> Rect {
@@ -1815,8 +1960,8 @@ fn inset(r: Rect, n: usize) -> Rect {
 }
 
 /// Whether `(x, y)` is inside rect `r` (used for the color picker's SV/Hue
-/// hit-testing).
-fn inside(r: Rect, x: f64, y: f64) -> bool {
+/// hit-testing and the General tab's menu-button chip drag).
+pub(super) fn inside(r: Rect, x: f64, y: f64) -> bool {
     x >= r.x0 as f64 && x < r.x1 as f64 && y >= r.y0 as f64 && y < r.y1 as f64
 }
 
@@ -1938,6 +2083,31 @@ pub(super) fn hover_tint_for(c: u32, dark: bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconcile_menu_buttons_marks_saved_items_shown_and_appends_the_rest_hidden() {
+        let saved = [store::MenuButton::Quit, store::MenuButton::Save];
+        let (shown, hidden) = reconcile_menu_buttons(&saved);
+        assert_eq!(
+            shown,
+            vec![store::MenuButton::Quit, store::MenuButton::Save]
+        );
+        // The rest follow, in MenuButton::ALL's order.
+        let expected_hidden: Vec<_> = store::MenuButton::ALL
+            .into_iter()
+            .filter(|b| !saved.contains(b))
+            .collect();
+        assert_eq!(hidden, expected_hidden);
+        assert_eq!(shown.len() + hidden.len(), store::MenuButton::ALL.len());
+    }
+
+    #[test]
+    fn reconcile_menu_buttons_round_trips_a_full_saved_list_unchanged_with_nothing_hidden() {
+        let saved = store::MenuButton::ALL;
+        let (shown, hidden) = reconcile_menu_buttons(&saved);
+        assert_eq!(shown, store::MenuButton::ALL.to_vec());
+        assert!(hidden.is_empty());
+    }
 
     #[test]
     fn save_row_layout_stretches_path_field_and_anchors_buttons_to_right_edge() {
