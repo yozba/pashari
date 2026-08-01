@@ -14,7 +14,7 @@ use crate::update::{self, ReleaseInfo};
 
 include!(concat!(env!("OUT_DIR"), "/used_crates.rs"));
 
-const LICENSE: &str = "GPL-3.0-or-later";
+const LICENSE: &str = "CC0-1.0";
 const REPO_URL: &str = "https://github.com/yozba/pashari";
 
 const HEADER_ROW_Y: usize = 72;
