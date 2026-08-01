@@ -31,47 +31,72 @@ const STARTUP_ROW_Y: usize =
 
 /// "Menu buttons" section: drag-reorder/show-hide the region-selection
 /// menu's buttons, laid out left-to-right (matching the real menu) as two
-/// rows of chips — "Shown" (in menu order) and "Hidden" (available but not
-/// shown). Dragging a chip within Shown reorders it; dragging between rows
-/// shows/hides it. No checkbox — which row a chip is in *is* its
+/// rows of chips — "Shown" (in menu order) and "Available" (things you can
+/// drag in). Dragging a chip within Shown reorders it; dragging it to
+/// Available removes it. No checkbox — which row a chip is in *is* its
 /// visibility. Each chip is drawn as a square, same as the real menu's
-/// buttons (`draw_icon_button`), with its label below.
+/// buttons (`draw_icon_button`), with its label below — except `Divider`,
+/// which draws as the same thin line it is in the real menu.
+///
+/// `Divider` is the one repeatable item (`MenuButton::repeatable`): its
+/// Available chip is a permanent template, not consumed when dragged in,
+/// and `Settings::menu_buttons_shown` can hold any number of independent
+/// copies of it. Every other item is a singleton, so a plain `MenuButton`
+/// value is enough to identify it — but with duplicates possible, a
+/// specific *chip* (for drag/hover) has to be identified by more than its
+/// value; see `MenuChipRef`.
 const MENU_BUTTONS_HEADER_Y: usize = next_row_y_with_extra_gap(STARTUP_ROW_Y, 30, 20);
 /// Mirrors `overlay::ACTION_BTN` (not importable here — `pub(super)` to
 /// `overlay`, and DPI-scaled there besides) so a chip is the same size as
 /// the real menu's square buttons.
 const CHIP_SIZE: usize = 56;
+/// Divider chip width — mirrors `overlay::menu`'s halved-relative-to-a-
+/// button divider width, so this layout UI looks like what capture mode
+/// actually shows instead of a generic square.
+const DIVIDER_CHIP_W: i64 = CHIP_SIZE as i64 / 6;
 const CHIP_GAP: i64 = 8;
 const CHIP_LINE_GAP: i64 = 8;
-/// Gap between a row's subheader ("Shown"/"Hidden") and its chips.
+/// Gap between a row's subheader ("Shown"/"Available") and its chips.
 const SUBHEADER_GAP: usize = 22;
-/// Gap between the Shown block's last chip row and the Hidden subheader.
+/// Gap between the Shown block's last chip row and the Available subheader.
 const BLOCK_GAP: usize = 16;
 /// Width of the drop-position indicator drawn between chips while dragging.
 const INSERT_BAR_W: usize = 3;
+
+/// A chip's width: `CHIP_SIZE` for everything except `Divider`, which is
+/// narrower (see `DIVIDER_CHIP_W`).
+fn chip_w(b: MenuButton) -> i64 {
+    if b == MenuButton::Divider {
+        DIVIDER_CHIP_W
+    } else {
+        CHIP_SIZE as i64
+    }
+}
 
 /// The row's usable width (content area minus the right margin).
 fn chip_row_max_w(sw: usize) -> i64 {
     sw.saturating_sub(CONTENT_X + 16) as i64
 }
 
-/// `items` laid out left to right as `CHIP_SIZE` squares starting at `y0`,
-/// wrapping to further lines if they don't fit `sw`. Order matches `items`.
+/// `items` laid out left to right starting at `y0`, wrapping to further
+/// lines if they don't fit `sw`. Order matches `items`. Every chip is
+/// `CHIP_SIZE` tall regardless of width (see `chip_w`).
 fn chip_rects(items: &[MenuButton], sw: usize, y0: usize) -> Vec<(MenuButton, Rect)> {
-    let widths = vec![CHIP_SIZE as i64; items.len()];
+    let widths: Vec<i64> = items.iter().map(|&b| chip_w(b)).collect();
     let slots = wrap_slots(&widths, CHIP_GAP, chip_row_max_w(sw));
     items
         .iter()
         .copied()
         .zip(slots)
-        .map(|(b, (line, x))| {
+        .zip(widths)
+        .map(|((b, (line, x)), w)| {
             let ry = y0 as i64 + line as i64 * (CHIP_SIZE as i64 + CHIP_LINE_GAP);
             (
                 b,
                 Rect {
                     x0: (CONTENT_X as i64 + x) as usize,
                     y0: ry as usize,
-                    x1: (CONTENT_X as i64 + x + CHIP_SIZE as i64) as usize,
+                    x1: (CONTENT_X as i64 + x + w) as usize,
                     y1: (ry + CHIP_SIZE as i64) as usize,
                 },
             )
@@ -81,7 +106,7 @@ fn chip_rects(items: &[MenuButton], sw: usize, y0: usize) -> Vec<(MenuButton, Re
 
 /// Total height of `items`'s wrapped chip rows (at least one line).
 fn chip_block_h(items: &[MenuButton], sw: usize) -> usize {
-    let widths = vec![CHIP_SIZE as i64; items.len()];
+    let widths: Vec<i64> = items.iter().map(|&b| chip_w(b)).collect();
     let slots = wrap_slots(&widths, CHIP_GAP, chip_row_max_w(sw));
     let lines = slots.last().map(|(l, _)| l + 1).unwrap_or(1) as i64;
     (lines * CHIP_SIZE as i64 + (lines - 1).max(0) * CHIP_LINE_GAP) as usize
@@ -95,64 +120,82 @@ fn shown_chips_y0() -> usize {
     shown_label_y() + SUBHEADER_GAP
 }
 
-/// The Hidden subheader's Y — depends on how many lines the Shown block
+/// The Available subheader's Y — depends on how many lines the Shown block
 /// wrapped to, hence the `shown`/`sw` parameters.
-fn hidden_label_y(shown: &[MenuButton], sw: usize) -> usize {
+fn available_label_y(shown: &[MenuButton], sw: usize) -> usize {
     shown_chips_y0() + chip_block_h(shown, sw) + BLOCK_GAP
 }
 
-fn hidden_chips_y0(shown: &[MenuButton], sw: usize) -> usize {
-    hidden_label_y(shown, sw) + SUBHEADER_GAP
+fn available_chips_y0(shown: &[MenuButton], sw: usize) -> usize {
+    available_label_y(shown, sw) + SUBHEADER_GAP
 }
 
-fn shown_chip_rects(shown: &[MenuButton], sw: usize) -> Vec<(MenuButton, Rect)> {
+/// What the "Available" row shows: every singleton not already in `shown`,
+/// plus `Divider` always (it's repeatable — see the module doc). In
+/// `MenuButton::ALL`'s canonical order.
+fn available_menu_buttons(shown: &[MenuButton]) -> Vec<MenuButton> {
+    MenuButton::ALL
+        .into_iter()
+        .filter(|b| b.repeatable() || !shown.contains(b))
+        .collect()
+}
+
+/// Identifies one on-screen chip — needed (rather than a bare `MenuButton`)
+/// because `Divider` can appear more than once in the Shown row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum MenuChipRef {
+    /// The chip at this index in `Settings::menu_buttons_shown`.
+    Shown(usize),
+    /// The Available row's entry for this button (see `available_menu_buttons`).
+    Available(MenuButton),
+}
+
+fn shown_chip_rects(shown: &[MenuButton], sw: usize) -> Vec<(MenuChipRef, MenuButton, Rect)> {
     chip_rects(shown, sw, shown_chips_y0())
+        .into_iter()
+        .enumerate()
+        .map(|(i, (b, r))| (MenuChipRef::Shown(i), b, r))
+        .collect()
 }
 
-fn hidden_chip_rects(
-    shown: &[MenuButton],
-    hidden: &[MenuButton],
-    sw: usize,
-) -> Vec<(MenuButton, Rect)> {
-    chip_rects(hidden, sw, hidden_chips_y0(shown, sw))
+fn available_chip_rects(shown: &[MenuButton], sw: usize) -> Vec<(MenuChipRef, MenuButton, Rect)> {
+    let available = available_menu_buttons(shown);
+    chip_rects(&available, sw, available_chips_y0(shown, sw))
+        .into_iter()
+        .map(|(b, r)| (MenuChipRef::Available(b), b, r))
+        .collect()
 }
 
 /// The chip under `(x, y)`, if any (checks both rows). Used to start a drag.
-pub(super) fn menu_chip_at(
-    shown: &[MenuButton],
-    hidden: &[MenuButton],
-    sw: usize,
-    x: f64,
-    y: f64,
-) -> Option<MenuButton> {
+pub(super) fn menu_chip_at(shown: &[MenuButton], sw: usize, x: f64, y: f64) -> Option<MenuChipRef> {
     shown_chip_rects(shown, sw)
         .into_iter()
-        .chain(hidden_chip_rects(shown, hidden, sw))
-        .find(|(_, r)| inside(*r, x, y))
-        .map(|(b, _)| b)
+        .chain(available_chip_rects(shown, sw))
+        .find(|(_, _, r)| inside(*r, x, y))
+        .map(|(cref, _, _)| cref)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum MenuRow {
     Shown,
-    Hidden,
+    Available,
 }
 
-/// Which row `y` is over: below the Hidden subheader is Hidden, everything
-/// else (including the Shown block and its own subheader) is Shown. A
-/// generous, forgiving split rather than exact per-row bounds.
+/// Which row `y` is over: below the Available subheader is Available,
+/// everything else (including the Shown block and its own subheader) is
+/// Shown. A generous, forgiving split rather than exact per-row bounds.
 pub(super) fn menu_row_at(shown: &[MenuButton], sw: usize, y: f64) -> MenuRow {
-    if y >= hidden_label_y(shown, sw) as f64 {
-        MenuRow::Hidden
+    if y >= available_label_y(shown, sw) as f64 {
+        MenuRow::Available
     } else {
         MenuRow::Shown
     }
 }
 
-/// Where `dragged` should land in `target` (with `dragged` already removed
-/// from it) given a drop at `(x, y)`: the index of the first chip that's on
-/// an earlier line, or on the same line but to the right of `x` —
-/// otherwise the end (append).
+/// Where a drop at `(x, y)` should land in `target` (already reflecting any
+/// removal — see `menu_chip_insert_bar`): the index of the first chip
+/// that's on an earlier line, or on the same line but to the right of `x`
+/// — otherwise the end (append).
 pub(super) fn menu_chip_drop_index(
     target: &[MenuButton],
     sw: usize,
@@ -170,19 +213,22 @@ pub(super) fn menu_chip_drop_index(
     rects.len()
 }
 
-/// The drop-position indicator's rect for a drag currently over `target`
-/// (with `dragged` already excluded from it) at `(x, y)`: a thin vertical
-/// bar just before the chip it would land at, or after the last chip (or
-/// at the row's start, if `target` is empty) when it would append.
+/// The drop-position indicator's rect for a drag currently over the Shown
+/// row at `(x, y)`. `full_list` is `Settings::menu_buttons_shown`
+/// unmodified — the dragged chip itself keeps rendering at its original
+/// spot for the whole drag (see `draw_menu_button_chip`) rather than being
+/// pulled out of the row, so `full_list` is what's actually on screen.
+/// `removed_at` is the dragged chip's own index in `full_list` if it came
+/// from Shown (`None` if it came from Available, i.e. nothing to remove).
 ///
-/// The dragged chip itself keeps rendering at its original spot for the
-/// whole drag (see `draw_menu_button_chip`) rather than being pulled out of
-/// the row — so `full_list` (still including it) is what's actually on
-/// screen, and this looks up positions there rather than from `target`'s
-/// own (gap-closed) layout, which would drift out of sync with the other
+/// Looked up via `full_list`'s positions rather than `target`'s own
+/// (gap-closed) layout, which would drift out of sync with the other
 /// chips' real positions once the dragged chip isn't at the very end.
+/// Index-mapped rather than matched by value, since `Divider` can repeat
+/// (a value-based lookup couldn't tell two dividers apart).
 fn menu_chip_insert_bar(
     full_list: &[MenuButton],
+    removed_at: Option<usize>,
     target: &[MenuButton],
     sw: usize,
     y0: usize,
@@ -191,10 +237,17 @@ fn menu_chip_insert_bar(
 ) -> Rect {
     let idx = menu_chip_drop_index(target, sw, y0, x, y);
     let full_rects = chip_rects(full_list, sw, y0);
-    let rect_of = |b: MenuButton| full_rects.iter().find(|(fb, _)| *fb == b).map(|(_, r)| *r);
+    // `target`'s index `j` is `full_list`'s index `j`, or `j + 1` past the
+    // point something was removed.
+    let to_full_idx = |j: usize| match removed_at {
+        Some(removed) if j >= removed => j + 1,
+        _ => j,
+    };
     let half_gap = (CHIP_GAP / 2) as usize;
 
-    if let Some(r) = target.get(idx).copied().and_then(rect_of) {
+    if idx < target.len()
+        && let Some((_, r)) = full_rects.get(to_full_idx(idx))
+    {
         let cx = r.x0.saturating_sub(half_gap);
         return Rect {
             x0: cx.saturating_sub(INSERT_BAR_W / 2),
@@ -204,7 +257,7 @@ fn menu_chip_insert_bar(
         };
     }
     if idx > 0
-        && let Some(r) = target.get(idx - 1).copied().and_then(rect_of)
+        && let Some((_, r)) = full_rects.get(to_full_idx(idx - 1))
     {
         let cx = r.x1 + half_gap;
         return Rect {
@@ -214,7 +267,7 @@ fn menu_chip_insert_bar(
             y1: r.y1,
         };
     }
-    // `target` is empty (only the dragged chip was in this row).
+    // `target` is empty (Shown only ever held the dragged chip).
     Rect {
         x0: CONTENT_X,
         y0,
@@ -261,27 +314,37 @@ impl Settings {
     }
 
     /// Drops the chip being dragged (`self.menu_drag`, already taken by the
-    /// caller) at the current cursor position: moves it between/within the
-    /// shown/hidden lists. No-op (drag simply cancelled) if the cursor
-    /// isn't over either row.
-    pub(super) fn drop_menu_chip(&mut self, dragged: MenuButton) {
+    /// caller) at the current cursor position.
+    ///
+    /// Dropped on Shown: reorders (if it came from Shown) or adds a new
+    /// instance (if it came from Available — for a singleton this is the
+    /// only copy there ever was; for `Divider` it's always a fresh one).
+    /// Dropped on Available: if it came from Shown, that instance is
+    /// simply removed (a singleton becomes available again automatically,
+    /// since Available is computed from what's *not* in Shown); if it
+    /// came from Available, nothing happened to begin with. No-op (drag
+    /// simply cancelled) if the cursor isn't over either row.
+    pub(super) fn drop_menu_chip(&mut self, dragged: MenuChipRef) {
         let sw = self.size.0;
         let (x, y) = self.cursor;
         let row = menu_row_at(&self.menu_buttons_shown, sw, y);
 
-        self.menu_buttons_shown.retain(|b| *b != dragged);
-        self.menu_buttons_hidden.retain(|b| *b != dragged);
+        let Some(value) = (match dragged {
+            MenuChipRef::Shown(i) => self.menu_buttons_shown.get(i).copied(),
+            MenuChipRef::Available(b) => Some(b),
+        }) else {
+            return;
+        };
+        if let MenuChipRef::Shown(i) = dragged
+            && i < self.menu_buttons_shown.len()
+        {
+            self.menu_buttons_shown.remove(i);
+        }
 
-        match row {
-            MenuRow::Shown => {
-                let i = menu_chip_drop_index(&self.menu_buttons_shown, sw, shown_chips_y0(), x, y);
-                self.menu_buttons_shown.insert(i, dragged);
-            }
-            MenuRow::Hidden => {
-                let y0 = hidden_chips_y0(&self.menu_buttons_shown, sw);
-                let i = menu_chip_drop_index(&self.menu_buttons_hidden, sw, y0, x, y);
-                self.menu_buttons_hidden.insert(i, dragged);
-            }
+        if row == MenuRow::Shown {
+            let i = menu_chip_drop_index(&self.menu_buttons_shown, sw, shown_chips_y0(), x, y);
+            self.menu_buttons_shown
+                .insert(i.min(self.menu_buttons_shown.len()), value);
         }
         self.request_redraw();
     }
@@ -399,9 +462,8 @@ pub(super) fn draw_general(
     filename_format_cursor: TextCursor,
     launch_at_startup: bool,
     menu_buttons_shown: &[MenuButton],
-    menu_buttons_hidden: &[MenuButton],
-    menu_drag: Option<MenuButton>,
-    chip_hover: Option<MenuButton>,
+    menu_drag: Option<MenuChipRef>,
+    chip_hover: Option<MenuChipRef>,
     cursor: (f64, f64),
 ) {
     let (
@@ -548,9 +610,10 @@ pub(super) fn draw_general(
     );
 
     // "Menu buttons": drag chips between "Shown" (in menu order) and
-    // "Hidden" to show/hide them; drag within "Shown" to reorder. Each chip
-    // is a square drawn exactly like the real menu's buttons
-    // (`draw_icon_button`), so it's obvious what it'll look like. Chips
+    // "Available" (things you can drag in); drag within "Shown" to
+    // reorder. Each chip is a square drawn exactly like the real menu's
+    // buttons (`draw_icon_button`), so it's obvious what it'll look like —
+    // except `Divider`, drawn as the thin line it actually is. Chips
     // aren't `Btn`s, so hover here is a direct cursor/rect check rather
     // than the generic `hover: Option<Btn>` (unused for this section).
     let _ = hover;
@@ -570,100 +633,98 @@ pub(super) fn draw_general(
         13.0,
         DIM,
     );
-    for (menu_btn, r) in shown_chip_rects(menu_buttons_shown, sw) {
+    for (cref, menu_btn, r) in shown_chip_rects(menu_buttons_shown, sw) {
         draw_menu_button_chip(
-            canvas, t, r, menu_btn, menu_drag, chip_hover, BTN_BG, TEXT, hover_tint,
+            canvas, t, r, cref, menu_btn, menu_drag, chip_hover, BTN_BG, TEXT, hover_tint,
         );
     }
-    let hidden_y = hidden_label_y(menu_buttons_shown, sw);
+    let available_y = available_label_y(menu_buttons_shown, sw);
     t.draw(
         canvas,
         CONTENT_X as f32,
-        (hidden_y + 14) as f32,
-        "Hidden",
+        (available_y + 14) as f32,
+        "Available",
         13.0,
         DIM,
     );
-    for (menu_btn, r) in hidden_chip_rects(menu_buttons_shown, menu_buttons_hidden, sw) {
+    for (cref, menu_btn, r) in available_chip_rects(menu_buttons_shown, sw) {
         draw_menu_button_chip(
-            canvas, t, r, menu_btn, menu_drag, chip_hover, FIELD_BG, DIM, hover_tint,
+            canvas, t, r, cref, menu_btn, menu_drag, chip_hover, FIELD_BG, DIM, hover_tint,
         );
     }
 
-    // While dragging, a thin bar shows exactly where the chip would land
-    // if dropped right now — recomputed live from the cursor position, but
-    // otherwise nothing about the layout changes mid-drag.
-    if let Some(dragged) = menu_drag {
-        let row = menu_row_at(menu_buttons_shown, sw, cursor.1);
-        let bar = match row {
-            MenuRow::Shown => {
-                let without_dragged: Vec<MenuButton> = menu_buttons_shown
-                    .iter()
-                    .copied()
-                    .filter(|b| *b != dragged)
-                    .collect();
-                menu_chip_insert_bar(
-                    menu_buttons_shown,
-                    &without_dragged,
-                    sw,
-                    shown_chips_y0(),
-                    cursor.0,
-                    cursor.1,
-                )
+    // While dragging onto Shown, a thin bar shows exactly where the chip
+    // would land if dropped right now — recomputed live from the cursor
+    // position, but otherwise nothing about the layout changes mid-drag.
+    // Dropping onto Available just removes/no-ops (see `drop_menu_chip`),
+    // so there's nothing to preview there.
+    if let Some(dragged) = menu_drag
+        && menu_row_at(menu_buttons_shown, sw, cursor.1) == MenuRow::Shown
+    {
+        let (removed_at, target) = match dragged {
+            MenuChipRef::Shown(i) => {
+                let mut t = menu_buttons_shown.to_vec();
+                if i < t.len() {
+                    t.remove(i);
+                }
+                (Some(i), t)
             }
-            MenuRow::Hidden => {
-                let without_dragged: Vec<MenuButton> = menu_buttons_hidden
-                    .iter()
-                    .copied()
-                    .filter(|b| *b != dragged)
-                    .collect();
-                let y0 = hidden_chips_y0(menu_buttons_shown, sw);
-                menu_chip_insert_bar(
-                    menu_buttons_hidden,
-                    &without_dragged,
-                    sw,
-                    y0,
-                    cursor.0,
-                    cursor.1,
-                )
-            }
+            MenuChipRef::Available(_) => (None, menu_buttons_shown.to_vec()),
         };
+        let bar = menu_chip_insert_bar(
+            menu_buttons_shown,
+            removed_at,
+            &target,
+            sw,
+            shown_chips_y0(),
+            cursor.0,
+            cursor.1,
+        );
         canvas.fill(bar, ACCENT);
     }
 }
 
 /// Draws one menu-button chip: the real menu's square-button look
-/// (`draw_icon_button`). The dragged chip keeps rendering right where it
-/// started (see `menu_chip_insert_bar`), just with the same subtle
-/// `hover_tint` treatment a plain hover gets — no separate "selected"
-/// color, so dragging it back over its own spot looks like nothing special
-/// is happening.
+/// (`draw_icon_button`) for anything except `Divider`, which draws as the
+/// same thin line it is in the real menu. The dragged chip keeps rendering
+/// right where it started (see `menu_chip_insert_bar`), just with the same
+/// subtle `hover_tint` treatment a plain hover gets — no separate
+/// "selected" color, so dragging it back over its own spot looks like
+/// nothing special is happening.
 #[allow(clippy::too_many_arguments)]
 fn draw_menu_button_chip(
     canvas: &mut Canvas,
     t: &TextRenderer,
     r: Rect,
+    cref: MenuChipRef,
     menu_btn: MenuButton,
-    menu_drag: Option<MenuButton>,
-    chip_hover: Option<MenuButton>,
+    menu_drag: Option<MenuChipRef>,
+    chip_hover: Option<MenuChipRef>,
     base: u32,
     fg: u32,
     hover_tint: impl Fn(u32) -> u32,
 ) {
-    let dragging = menu_drag == Some(menu_btn);
+    let dragging = menu_drag == Some(cref);
     // No hover highlight on other chips while any drag is in progress —
     // sweeping the cursor across the row while dragging shouldn't light up
     // everything it passes over. `chip_hover` only reflects an actual
     // `CursorMoved`, not raw cursor-vs-rect at draw time, so a chip
     // doesn't light up just because the layout shifted under a
     // stationary cursor (e.g. right after a drop reorders things).
-    let hovered = menu_drag.is_none() && chip_hover == Some(menu_btn);
+    let hovered = menu_drag.is_none() && chip_hover == Some(cref);
     let bg = if dragging || hovered {
         hover_tint(base)
     } else {
         base
     };
-    draw_icon_button(canvas, r, bg, fg, menu_btn.label(), fg, t);
+    if menu_btn == MenuButton::Divider {
+        canvas.fill(r, bg);
+        let inset = (r.height() as f64 * 0.2) as i64;
+        let cx = ((r.x0 + r.x1) / 2) as i64;
+        canvas.line(cx, r.y0 as i64 + inset, cx, r.y1 as i64 - inset, 2, fg);
+    } else {
+        draw_icon_button(canvas, r, bg, fg, menu_btn.label(), fg, t);
+    }
 }
 
 #[cfg(test)]
@@ -717,15 +778,15 @@ mod tests {
 
     #[test]
     fn menu_chip_insert_bar_appends_at_the_full_lists_true_right_edge() {
-        // Dragging the FIRST of 3 chips toward the far right: `without_dragged`
-        // (Copy, Quit) would compact leftward if laid out on its own, but
-        // since the dragged chip keeps rendering in place, Copy/Quit are
-        // still exactly where the *full* list puts them — the bar must
-        // align with Quit's true on-screen right edge, not with a
-        // recomputed "2 items only" layout (which would put it noticeably
-        // further left, one chip-width + gap short).
+        // Dragging the FIRST of 3 chips (index 0) toward the far right:
+        // `target` (Copy, Quit) would compact leftward if laid out on its
+        // own, but since the dragged chip keeps rendering in place,
+        // Copy/Quit are still exactly where the *full* list puts them —
+        // the bar must align with Quit's true on-screen right edge, not
+        // with a recomputed "2 items only" layout (which would put it
+        // noticeably further left, one chip-width + gap short).
         let full = [MenuButton::Save, MenuButton::Copy, MenuButton::Quit];
-        let without_dragged = [MenuButton::Copy, MenuButton::Quit];
+        let target = [MenuButton::Copy, MenuButton::Quit];
         let full_rects = chip_rects(&full, 720, 0);
         let quit_rect = full_rects
             .iter()
@@ -735,7 +796,8 @@ mod tests {
 
         let bar = menu_chip_insert_bar(
             &full,
-            &without_dragged,
+            Some(0),
+            &target,
             720,
             0,
             (quit_rect.x1 + 100) as f64,
@@ -747,7 +809,30 @@ mod tests {
     }
 
     #[test]
-    fn chip_rects_are_uniform_squares_in_order_without_overlap() {
+    fn menu_chip_insert_bar_tells_apart_duplicate_dividers_by_index() {
+        // Two dividers around Save; dragging the FIRST one (index 0) far to
+        // the right should land the bar after Save/the second divider —
+        // not confuse the two dividers via a value-based lookup.
+        let full = [MenuButton::Divider, MenuButton::Save, MenuButton::Divider];
+        let target = [MenuButton::Save, MenuButton::Divider];
+        let full_rects = chip_rects(&full, 720, 0);
+        let last_rect = full_rects.last().unwrap().1;
+
+        let bar = menu_chip_insert_bar(
+            &full,
+            Some(0),
+            &target,
+            720,
+            0,
+            (last_rect.x1 + 100) as f64,
+            last_rect.y0 as f64 + 1.0,
+        );
+
+        assert!(bar.x0 >= last_rect.x1);
+    }
+
+    #[test]
+    fn chip_rects_are_same_height_in_order_without_overlap() {
         let items = [MenuButton::SizeAspect, MenuButton::Save, MenuButton::Quit];
         let rects = chip_rects(&items, 720, 0);
         for (_, r) in &rects {
@@ -760,13 +845,66 @@ mod tests {
     }
 
     #[test]
-    fn menu_row_at_splits_exactly_on_the_hidden_subheader() {
+    fn chip_rects_make_a_divider_narrower_than_a_regular_chip() {
+        let items = [MenuButton::Save, MenuButton::Divider];
+        let rects = chip_rects(&items, 720, 0);
+        assert!(rects[1].1.width() < rects[0].1.width());
+        assert_eq!(rects[1].1.height(), CHIP_SIZE);
+    }
+
+    #[test]
+    fn menu_row_at_splits_exactly_on_the_available_subheader() {
         let shown = [MenuButton::Save];
-        let boundary = hidden_label_y(&shown, 720);
+        let boundary = available_label_y(&shown, 720);
         assert_eq!(
             menu_row_at(&shown, 720, (boundary - 1) as f64),
             MenuRow::Shown
         );
-        assert_eq!(menu_row_at(&shown, 720, boundary as f64), MenuRow::Hidden);
+        assert_eq!(
+            menu_row_at(&shown, 720, boundary as f64),
+            MenuRow::Available
+        );
+    }
+
+    #[test]
+    fn available_menu_buttons_excludes_shown_singletons_but_always_includes_divider() {
+        let shown = [MenuButton::Save, MenuButton::Divider, MenuButton::Divider];
+        let available = available_menu_buttons(&shown);
+        assert!(!available.contains(&MenuButton::Save));
+        assert!(available.contains(&MenuButton::Copy));
+        // Divider stays available even though it's already shown twice.
+        assert_eq!(
+            available
+                .iter()
+                .filter(|b| **b == MenuButton::Divider)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn menu_chip_at_identifies_shown_chips_by_index_not_just_value() {
+        // Two Save chips can't both exist (singleton), but two dividers can
+        // — and each must resolve to its own index, not the same ref.
+        let shown = [MenuButton::Divider, MenuButton::Save, MenuButton::Divider];
+        let rects = shown_chip_rects(&shown, 720);
+        let (first_divider_ref, _, first_divider_rect) = rects[0];
+        let (second_divider_ref, _, second_divider_rect) = rects[2];
+        assert_ne!(first_divider_ref, second_divider_ref);
+
+        let hit_first = menu_chip_at(
+            &shown,
+            720,
+            ((first_divider_rect.x0 + first_divider_rect.x1) / 2) as f64,
+            ((first_divider_rect.y0 + first_divider_rect.y1) / 2) as f64,
+        );
+        let hit_second = menu_chip_at(
+            &shown,
+            720,
+            ((second_divider_rect.x0 + second_divider_rect.x1) / 2) as f64,
+            ((second_divider_rect.y0 + second_divider_rect.y1) / 2) as f64,
+        );
+        assert_eq!(hit_first, Some(first_divider_ref));
+        assert_eq!(hit_second, Some(second_divider_ref));
     }
 }

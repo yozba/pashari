@@ -2917,6 +2917,18 @@ impl Overlay {
                                     self.request_redraw();
                                     return;
                                 }
+                                // Still absorb clicks elsewhere within the
+                                // panel (a spacer/divider's empty area) so
+                                // they don't fall through into starting a
+                                // new selection or resizing/moving the
+                                // current one underneath.
+                                if cx >= m.rect.x0
+                                    && cx < m.rect.x1
+                                    && cy >= m.rect.y0
+                                    && cy < m.rect.y1
+                                {
+                                    return;
+                                }
                             }
                             // Menu phase: handle -> resize / inside -> move / outside -> redo.
                             if let Some(sel) = self.selection {

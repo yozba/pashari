@@ -40,13 +40,19 @@ pub enum MenuButton {
     ClearSelection,
     SaveAs,
     EditExternal,
+    /// A visible vertical line between buttons — layout-only, not an
+    /// action (no hotkey, never disabled, absorbs clicks without firing
+    /// anything). Unlike every other variant, more than one can appear in
+    /// `Config::menu_buttons` at once (see `repeatable`).
+    Divider,
 }
 
 impl MenuButton {
     /// Every item that can appear in the menu, in a fixed canonical order
-    /// (used to fill the settings GUI's "hidden" pool with anything not
-    /// in the saved/visible list).
-    pub const ALL: [MenuButton; 13] = [
+    /// (used to fill the settings GUI's "available" pool with anything not
+    /// in the saved/visible list — see `repeatable` for why `Divider`
+    /// always stays in that pool regardless of how many are shown).
+    pub const ALL: [MenuButton; 14] = [
         Self::SizeAspect,
         Self::Save,
         Self::Copy,
@@ -60,11 +66,22 @@ impl MenuButton {
         Self::ClearSelection,
         Self::SaveAs,
         Self::EditExternal,
+        Self::Divider,
     ];
 
+    /// Whether more than one of this item can be shown at once. Everything
+    /// except `Divider` is a singleton — added to the menu at most once,
+    /// so placing it removes it from the "available" pool and removing it
+    /// returns it there. `Divider` instead always stays available (it's a
+    /// layout aid, not a distinct action), and each placed copy is its own
+    /// independent instance.
+    pub fn repeatable(self) -> bool {
+        matches!(self, Self::Divider)
+    }
+
     /// The default *visible* set — the menu's original fixed layout, before
-    /// this customization feature existed. The other 6 items are available
-    /// but start hidden, so a fresh install isn't cluttered with all 13.
+    /// this customization feature existed. The rest of `ALL` starts in the
+    /// "available" pool instead, so a fresh install isn't cluttered.
     const DEFAULT_VISIBLE: [MenuButton; 7] = [
         Self::SizeAspect,
         Self::Save,
@@ -94,6 +111,7 @@ impl MenuButton {
             Self::ClearSelection => "Reset",
             Self::SaveAs => "Save As",
             Self::EditExternal => "Edit Ext",
+            Self::Divider => "Divider",
         }
     }
 
@@ -114,6 +132,7 @@ impl MenuButton {
             Self::ClearSelection => "clear_selection",
             Self::SaveAs => "save_as",
             Self::EditExternal => "edit_external",
+            Self::Divider => "divider",
         }
     }
 }
@@ -533,16 +552,29 @@ mod tests {
                 .menu_buttons,
             MenuButton::DEFAULT_VISIBLE.to_vec()
         );
-        // Round-trips one of the new (non-default-visible) variants too.
+        // Round-trips one of the new (non-default-visible) variants too,
+        // including *multiple* dividers (the only repeatable variant).
         let cfg = Config {
-            menu_buttons: vec![MenuButton::Quit, MenuButton::Save, MenuButton::Undo],
+            menu_buttons: vec![
+                MenuButton::Quit,
+                MenuButton::Divider,
+                MenuButton::Save,
+                MenuButton::Divider,
+                MenuButton::Undo,
+            ],
             ..Config::default()
         };
         assert_eq!(
             toml::from_str::<Config>(&render_toml(&cfg))
                 .unwrap()
                 .menu_buttons,
-            vec![MenuButton::Quit, MenuButton::Save, MenuButton::Undo]
+            vec![
+                MenuButton::Quit,
+                MenuButton::Divider,
+                MenuButton::Save,
+                MenuButton::Divider,
+                MenuButton::Undo,
+            ]
         );
     }
 

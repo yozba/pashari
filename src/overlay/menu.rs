@@ -60,6 +60,15 @@ const ASPECT_BTN_SQUARES: usize = 2;
 const ASPECT_BTN_FONT: f32 = 15.0;
 /// Height of each row in the open aspect-ratio option list.
 const ASPECT_ROW_H: usize = 22;
+/// Divider slot width, as a fraction of `ACTION_BTN` — just enough room
+/// for a line with some breathing space either side, not a full button.
+const DIVIDER_W_DIVISOR: usize = 6;
+/// Divider slot width never shrinks below this, so it stays visible even
+/// at a tiny `ACTION_BTN * dpi`.
+const DIVIDER_W_MIN: usize = 6;
+/// Vertical inset of the divider line from the top/bottom of its slot.
+const DIVIDER_INSET_FRAC: f64 = 0.2;
+const DIVIDER_COLOR: u32 = 0x0055_5555;
 
 /// Aspect-ratio presets the dropdown offers (`None` = free/unlocked),
 /// in display order.
@@ -119,10 +128,12 @@ pub struct Button {
 
 /// One `button_order` entry, resolved to what it actually takes to lay
 /// out and draw: either the size/aspect-ratio slot (double-width, its own
-/// draw code) or a regular single-width `Action` button.
+/// draw code), a regular single-width `Action` button, or a layout-only
+/// divider (narrow line, not clickable).
 enum MenuSlot {
     Aspect,
     Action(Action, &'static str, Vec<LocalKey>),
+    Divider,
 }
 
 /// The label is always `b.label()` — one short label per `MenuButton`,
@@ -150,6 +161,7 @@ fn menu_slot(b: MenuButton, keys: &RegionKeys) -> MenuSlot {
         MenuButton::EditExternal => {
             MenuSlot::Action(Action::EditExternal, b.label(), keys.edit_external.clone())
         }
+        MenuButton::Divider => MenuSlot::Divider,
     }
 }
 
@@ -170,6 +182,14 @@ pub struct Menu {
     /// The combined size/aspect-ratio button's rect, if `button_order`
     /// included it (`None` means it's hidden — no button, no dropdown).
     pub aspect_rect: Option<Rect>,
+    /// One rect per divider `button_order` included (any number, including
+    /// zero). Not clickable — see `draw` for how the lines themselves are drawn.
+    pub divider_rects: Vec<Rect>,
+    /// The whole panel's bounding box (all slots, including dividers).
+    /// Used to absorb a click anywhere within the menu — e.g. right on a
+    /// divider — rather than letting it fall through to the selection
+    /// underneath.
+    pub rect: Rect,
 }
 
 impl Menu {
@@ -204,6 +224,7 @@ impl Menu {
         let action_btn = ((ACTION_BTN as f64) * dpi).round() as usize;
         let margin = ((MARGIN as f64) * dpi).round() as usize;
         let aspect_btn_w = action_btn * ASPECT_BTN_SQUARES;
+        let divider_w = (action_btn / DIVIDER_W_DIVISOR).max(DIVIDER_W_MIN);
 
         let slots: Vec<MenuSlot> = button_order.iter().map(|b| menu_slot(*b, keys)).collect();
         let panel_w: usize = slots
@@ -211,6 +232,7 @@ impl Menu {
             .map(|s| match s {
                 MenuSlot::Aspect => aspect_btn_w,
                 MenuSlot::Action(..) => action_btn,
+                MenuSlot::Divider => divider_w,
             })
             .sum();
         let panel_h = action_btn;
@@ -232,6 +254,7 @@ impl Menu {
         };
 
         let mut aspect_rect = None;
+        let mut divider_rects = Vec::new();
         let mut buttons = Vec::with_capacity(slots.len());
         let mut bx = px;
         for slot in slots {
@@ -260,6 +283,15 @@ impl Menu {
                     });
                     bx += action_btn;
                 }
+                MenuSlot::Divider => {
+                    divider_rects.push(Rect {
+                        x0: bx,
+                        y0: py,
+                        x1: bx + divider_w,
+                        y1: py + action_btn,
+                    });
+                    bx += divider_w;
+                }
             }
         }
 
@@ -268,6 +300,13 @@ impl Menu {
             size_label: format!("{} x {}", sel.width(), sel.height()),
             aspect_label: aspect_option_label(aspect_lock),
             aspect_rect,
+            divider_rects,
+            rect: Rect {
+                x0: px,
+                y0: py,
+                x1: px + panel_w,
+                y1: py + panel_h,
+            },
         }
     }
 
@@ -345,6 +384,21 @@ pub fn draw(
         } else {
             canvas.fill(btn.rect, bg);
         }
+    }
+
+    // Each divider: a thin vertical line centered in its slot, inset from
+    // the top/bottom so it doesn't touch the panel's edges.
+    for r in &menu.divider_rects {
+        let inset = (r.height() as f64 * DIVIDER_INSET_FRAC) as i64;
+        let cx = ((r.x0 + r.x1) / 2) as i64;
+        canvas.line(
+            cx,
+            r.y0 as i64 + inset,
+            cx,
+            r.y1 as i64 - inset,
+            2,
+            DIVIDER_COLOR,
+        );
     }
 
     // Drawn last so the open option list sits on top of the size label
@@ -470,12 +524,7 @@ mod tests {
             None,
             1.0,
         );
-        let panel_x0 = m
-            .aspect_rect
-            .expect("MenuButton::ALL includes SizeAspect")
-            .x0;
-        let panel_x1 = m.buttons[m.buttons.len() - 1].rect.x1;
-        let panel_center = (panel_x0 + panel_x1) / 2;
+        let panel_center = (m.rect.x0 + m.rect.x1) / 2;
         assert_eq!(panel_center, 1100);
     }
 
@@ -521,6 +570,64 @@ mod tests {
             m.buttons[1].rect.x1 - m.buttons[0].rect.x0,
             m.buttons[0].rect.width() * 2
         );
+    }
+
+    #[test]
+    fn menu_layout_places_a_divider_between_buttons_without_making_it_a_button() {
+        let order = [MenuButton::Save, MenuButton::Divider, MenuButton::Quit];
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &order,
+            &test_availability(),
+            None,
+            1.0,
+        );
+        // Only Save and Quit are real (clickable) buttons.
+        assert_eq!(m.buttons.len(), 2);
+        assert!(matches!(m.buttons[0].action, Action::Save));
+        assert!(matches!(m.buttons[1].action, Action::Quit));
+        // The divider sits between them, narrower than a full button, and
+        // isn't reachable via `hit`.
+        assert_eq!(m.divider_rects.len(), 1);
+        let d = m.divider_rects[0];
+        assert_eq!(d.x0, m.buttons[0].rect.x1);
+        assert_eq!(d.x1, m.buttons[1].rect.x0);
+        assert!(d.width() < m.buttons[0].rect.width());
+        let (dcx, dcy) = ((d.x0 + d.x1) / 2, (d.y0 + d.y1) / 2);
+        assert_eq!(m.hit(dcx, dcy), None);
+        // The panel's overall bounds still span from Save's left edge to Quit's right edge.
+        assert_eq!(m.rect.x0, m.buttons[0].rect.x0);
+        assert_eq!(m.rect.x1, m.buttons[1].rect.x1);
+    }
+
+    #[test]
+    fn menu_layout_supports_multiple_dividers() {
+        let order = [
+            MenuButton::Divider,
+            MenuButton::Save,
+            MenuButton::Divider,
+            MenuButton::Quit,
+            MenuButton::Divider,
+        ];
+        let m = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &order,
+            &test_availability(),
+            None,
+            1.0,
+        );
+        assert_eq!(m.buttons.len(), 2);
+        assert_eq!(m.divider_rects.len(), 3);
+        // Left to right: divider, Save, divider, Quit, divider — none overlap.
+        assert_eq!(m.divider_rects[0].x1, m.buttons[0].rect.x0);
+        assert_eq!(m.buttons[0].rect.x1, m.divider_rects[1].x0);
+        assert_eq!(m.divider_rects[1].x1, m.buttons[1].rect.x0);
+        assert_eq!(m.buttons[1].rect.x1, m.divider_rects[2].x0);
+        assert_eq!(m.rect.x1, m.divider_rects[2].x1);
     }
 
     #[test]

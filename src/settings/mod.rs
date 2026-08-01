@@ -356,22 +356,20 @@ pub struct Settings {
     launch_at_startup: bool,
     /// Region-selection menu's buttons currently shown, in display order
     /// (General tab) — this order is exactly what gets saved. Working
-    /// state, reconciled from `Config.menu_buttons` in `Settings::open`
-    /// via `reconcile_menu_buttons`.
+    /// state, initialized directly from `Config.menu_buttons` in
+    /// `Settings::open` (the "Available" pool is derived from this, not
+    /// stored — see `general::available_menu_buttons`).
     menu_buttons_shown: Vec<store::MenuButton>,
-    /// The rest of `store::MenuButton::ALL`, not currently shown. Order is
-    /// UI-only (not persisted) — kept stable so chips don't jump around.
-    menu_buttons_hidden: Vec<store::MenuButton>,
     /// A chip that's been pressed but hasn't moved far enough yet to count
     /// as a drag (the chip, and the cursor position at press time). A
     /// plain click (press+release without crossing `MENU_DRAG_THRESHOLD`)
     /// never promotes this to `menu_drag`, so it does nothing — clicking a
     /// chip isn't itself a reorder action, only actually dragging it is.
-    menu_press: Option<(store::MenuButton, (f64, f64))>,
+    menu_press: Option<(general::MenuChipRef, (f64, f64))>,
     /// The chip actually being dragged (movement past the threshold), if
     /// any. Rendering doesn't otherwise change while this is `Some`; the
-    /// shown/hidden lists only update on drop.
-    menu_drag: Option<store::MenuButton>,
+    /// shown list only updates on drop.
+    menu_drag: Option<general::MenuChipRef>,
     /// The chip currently under the cursor, for hover styling — updated
     /// only by an actual `CursorMoved` (see the `WindowEvent::CursorMoved`
     /// handler's plain, nothing-else-in-progress branch), *not*
@@ -380,7 +378,7 @@ pub struct Settings {
     /// stationary cursor (e.g. right after a drop reorders things),
     /// lighting up whatever chip the mouse happens to now sit over even
     /// though it never actually moved there.
-    chip_hover: Option<store::MenuButton>,
+    chip_hover: Option<general::MenuChipRef>,
     /// Path to the external editor executable; used for Shift+E if set.
     external_editor: String,
     /// "Show mouse cursor in recordings" checkbox (Video tab).
@@ -562,17 +560,6 @@ pub struct Settings {
 /// Builds the General tab's menu-layout working state (shown, hidden) from
 /// the persisted, visible-only, ordered list: `shown` is `saved` as-is;
 /// `hidden` is whatever's left of `MenuButton::ALL`, in its canonical order.
-fn reconcile_menu_buttons(
-    saved: &[store::MenuButton],
-) -> (Vec<store::MenuButton>, Vec<store::MenuButton>) {
-    let shown = saved.to_vec();
-    let hidden = store::MenuButton::ALL
-        .into_iter()
-        .filter(|b| !saved.contains(b))
-        .collect();
-    (shown, hidden)
-}
-
 impl Settings {
     /// Opens the window with the current settings. `update_available`/
     /// `update_proxy` are the App's current update-check state (a display
@@ -639,8 +626,6 @@ impl Settings {
         // (the previous default look) where it can't be read.
         let dark = window.theme().map(|t| t == Theme::Dark).unwrap_or(true);
 
-        let (menu_buttons_shown, menu_buttons_hidden) = reconcile_menu_buttons(&cfg.menu_buttons);
-
         let mut this = Self {
             window: Some(window),
             _context: Some(context),
@@ -655,8 +640,7 @@ impl Settings {
             save_dir_mp4: cfg.save_dir_mp4,
             save_dir_gif: cfg.save_dir_gif,
             launch_at_startup: cfg.launch_at_startup,
-            menu_buttons_shown,
-            menu_buttons_hidden,
+            menu_buttons_shown: cfg.menu_buttons,
             menu_press: None,
             menu_drag: None,
             chip_hover: None,
@@ -921,13 +905,7 @@ impl Settings {
                         self.request_redraw();
                     }
                     let chip_hover = if self.tab == Tab::General {
-                        general::menu_chip_at(
-                            &self.menu_buttons_shown,
-                            &self.menu_buttons_hidden,
-                            self.size.0,
-                            x,
-                            y,
-                        )
+                        general::menu_chip_at(&self.menu_buttons_shown, self.size.0, x, y)
                     } else {
                         None
                     };
@@ -1224,13 +1202,8 @@ impl Settings {
                 // `MENU_DRAG_THRESHOLD` (see `CursorMoved`), so a plain
                 // click does nothing.
                 if self.tab == Tab::General
-                    && let Some(b) = general::menu_chip_at(
-                        &self.menu_buttons_shown,
-                        &self.menu_buttons_hidden,
-                        self.size.0,
-                        cx,
-                        cy,
-                    )
+                    && let Some(b) =
+                        general::menu_chip_at(&self.menu_buttons_shown, self.size.0, cx, cy)
                 {
                     self.menu_press = Some((b, (cx, cy)));
                     return None;
@@ -1464,7 +1437,6 @@ impl Settings {
         let external_editor = self.external_editor.clone();
         let launch_at_startup = self.launch_at_startup;
         let menu_buttons_shown = self.menu_buttons_shown.clone();
-        let menu_buttons_hidden = self.menu_buttons_hidden.clone();
         let menu_drag = self.menu_drag;
         let chip_hover = self.chip_hover;
         let cursor = self.cursor;
@@ -1661,7 +1633,6 @@ impl Settings {
                     filename_format_cursor,
                     launch_at_startup,
                     &menu_buttons_shown,
-                    &menu_buttons_hidden,
                     menu_drag,
                     chip_hover,
                     cursor,
@@ -2083,31 +2054,6 @@ pub(super) fn hover_tint_for(c: u32, dark: bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reconcile_menu_buttons_marks_saved_items_shown_and_appends_the_rest_hidden() {
-        let saved = [store::MenuButton::Quit, store::MenuButton::Save];
-        let (shown, hidden) = reconcile_menu_buttons(&saved);
-        assert_eq!(
-            shown,
-            vec![store::MenuButton::Quit, store::MenuButton::Save]
-        );
-        // The rest follow, in MenuButton::ALL's order.
-        let expected_hidden: Vec<_> = store::MenuButton::ALL
-            .into_iter()
-            .filter(|b| !saved.contains(b))
-            .collect();
-        assert_eq!(hidden, expected_hidden);
-        assert_eq!(shown.len() + hidden.len(), store::MenuButton::ALL.len());
-    }
-
-    #[test]
-    fn reconcile_menu_buttons_round_trips_a_full_saved_list_unchanged_with_nothing_hidden() {
-        let saved = store::MenuButton::ALL;
-        let (shown, hidden) = reconcile_menu_buttons(&saved);
-        assert_eq!(shown, store::MenuButton::ALL.to_vec());
-        assert!(hidden.is_empty());
-    }
 
     #[test]
     fn save_row_layout_stretches_path_field_and_anchors_buttons_to_right_edge() {
