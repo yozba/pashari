@@ -22,16 +22,21 @@ pub(super) struct MenuKeys {
     pub quit: Vec<LocalKey>,
 }
 
-/// Number of buttons.
+/// Number of action buttons (Save/Copy/Edit/Upload/Video/Quit — not
+/// counting the combined size/aspect-ratio button to their left).
 const N: usize = 6;
 /// Gap between the selection outline and the menu.
 const MARGIN: usize = 10;
-/// Height of the size-label row above the buttons.
-const LABEL_H: usize = 22;
-const LABEL_FONT: f32 = 12.0;
-/// Height of the aspect-ratio row above the size-label row.
+/// Width of the combined size/aspect-ratio button, in `ACTION_BTN`
+/// squares — wider than the other (single-square) buttons so its two
+/// text lines have room to breathe.
+const ASPECT_BTN_SQUARES: usize = 2;
+/// Font size for the combined button's two stacked lines (size on top,
+/// aspect-ratio state on bottom) and the dropdown's option list — all
+/// the same size.
+const ASPECT_BTN_FONT: f32 = 15.0;
+/// Height of each row in the open aspect-ratio option list.
 const ASPECT_ROW_H: usize = 22;
-const ASPECT_FONT: f32 = 12.0;
 
 /// Aspect-ratio presets the dropdown offers (`None` = free/unlocked),
 /// in display order.
@@ -44,11 +49,6 @@ pub(super) fn aspect_option_label(preset: Option<(u32, u32)>) -> String {
         None => "Free".to_string(),
         Some((w, h)) => format!("{w}:{h}"),
     }
-}
-
-/// The closed dropdown button's label.
-fn aspect_label(lock: Option<(u32, u32)>) -> String {
-    format!("Aspect: {}", aspect_option_label(lock))
 }
 
 /// The 4 option rows shown while the aspect dropdown is open, stacked
@@ -94,18 +94,19 @@ pub struct Button {
     pub disabled: bool,
 }
 
-/// A menu with a fixed `N` buttons, plus (top to bottom) an aspect-ratio
-/// dropdown row and a label row showing the selection's pixel size. No
-/// frame is drawn around the buttons (each stands alone).
+/// A menu with a fixed `N` action buttons, plus one more square button to
+/// their left combining the selection's pixel size and the aspect-ratio
+/// dropdown (same size as the rest, so the row reads as one uniform set
+/// of squares). No frame is drawn around any of them (each stands alone).
 #[derive(Clone)]
 pub struct Menu {
     pub buttons: [Button; N],
     /// The selection's size as "W x H", precomputed so `draw` doesn't
     /// need the selection rect too.
     pub size_label: String,
-    pub label_rect: Rect,
-    /// The aspect-ratio dropdown's closed-button label ("Aspect: Free", ...).
+    /// The aspect-ratio dropdown's current state ("Free", "1:1", ...).
     pub aspect_label: String,
+    /// The combined size/aspect-ratio button, left of `buttons[0]`.
     pub aspect_rect: Rect,
 }
 
@@ -137,8 +138,6 @@ impl Menu {
     ) -> Self {
         let action_btn = ((ACTION_BTN as f64) * dpi).round() as usize;
         let margin = ((MARGIN as f64) * dpi).round() as usize;
-        let label_h = ((LABEL_H as f64) * dpi).round() as usize;
-        let aspect_row_h = ((ASPECT_ROW_H as f64) * dpi).round() as usize;
 
         // (Action, label, keys, gap from the previous button). All gaps
         // are currently 0 (packed together); to space out a specific
@@ -152,8 +151,9 @@ impl Menu {
             (Action::Quit, "Quit", keys.quit.clone(), 0),
         ];
         let total_gap: usize = specs.iter().map(|(.., g)| g).sum();
-        let panel_w = action_btn * N + total_gap;
-        let panel_h = aspect_row_h + label_h + action_btn;
+        let aspect_btn_w = action_btn * ASPECT_BTN_SQUARES;
+        let panel_w = action_btn * N + aspect_btn_w + total_gap;
+        let panel_h = action_btn;
 
         // Horizontal position: aligned to the selection's left edge, clamped within bounds.
         let px = sel
@@ -179,16 +179,9 @@ impl Menu {
         let aspect_rect = Rect {
             x0: px,
             y0: py,
-            x1: px + panel_w,
-            y1: py + aspect_row_h,
+            x1: px + aspect_btn_w,
+            y1: py + action_btn,
         };
-        let label_rect = Rect {
-            x0: px,
-            y0: py + aspect_row_h,
-            x1: px + panel_w,
-            y1: py + aspect_row_h + label_h,
-        };
-        let buttons_y = py + aspect_row_h + label_h;
 
         let mut buttons: [Button; N] = std::array::from_fn(|_| Button {
             rect: panel,
@@ -197,7 +190,7 @@ impl Menu {
             hotkeys: Vec::new(),
             disabled: false,
         });
-        let mut bx = px;
+        let mut bx = px + aspect_btn_w;
         for (i, (action, label, hotkeys, gap_before)) in specs.into_iter().enumerate() {
             if i > 0 {
                 bx += gap_before;
@@ -205,9 +198,9 @@ impl Menu {
             buttons[i] = Button {
                 rect: Rect {
                     x0: bx,
-                    y0: buttons_y,
+                    y0: py,
                     x1: bx + action_btn,
-                    y1: buttons_y + action_btn,
+                    y1: py + action_btn,
                 },
                 disabled: matches!(action, Action::Upload) && !uploaders_configured,
                 action,
@@ -220,8 +213,7 @@ impl Menu {
         Self {
             buttons,
             size_label: format!("{} x {}", sel.width(), sel.height()),
-            label_rect,
-            aspect_label: aspect_label(aspect_lock),
+            aspect_label: aspect_option_label(aspect_lock),
             aspect_rect,
         }
     }
@@ -251,37 +243,34 @@ pub fn draw(
     aspect_lock: Option<(u32, u32)>,
     aspect_dropdown_open: bool,
 ) {
+    // The combined size/aspect-ratio button: same square as the other
+    // buttons, with two centered lines (size on top, ratio state below)
+    // instead of an icon+label.
     canvas.fill(menu.aspect_rect, BTN_BG);
     if let Some(t) = text {
-        let tw = t.text_width(&menu.aspect_label, ASPECT_FONT);
-        let lx = menu.aspect_rect.x0 as f32 + (menu.aspect_rect.width() as f32 - tw) / 2.0;
-        let baseline = t.baseline_for_center(
-            (menu.aspect_rect.y0 + menu.aspect_rect.y1) as f32 / 2.0,
-            ASPECT_FONT,
-        );
-        t.draw(
-            canvas,
-            lx,
-            baseline,
-            &menu.aspect_label,
-            ASPECT_FONT,
-            TEXT_COLOR,
-        );
-    }
-    canvas.fill(menu.label_rect, BTN_BG);
-    if let Some(t) = text {
-        let tw = t.text_width(&menu.size_label, LABEL_FONT);
-        let lx = menu.label_rect.x0 as f32 + (menu.label_rect.width() as f32 - tw) / 2.0;
-        let baseline = t.baseline_for_center(
-            (menu.label_rect.y0 + menu.label_rect.y1) as f32 / 2.0,
-            LABEL_FONT,
-        );
+        let r = menu.aspect_rect;
+        let top_cy = r.y0 as f32 + r.height() as f32 * 0.3;
+        let bottom_cy = r.y0 as f32 + r.height() as f32 * 0.72;
+        let tw = t.text_width(&menu.size_label, ASPECT_BTN_FONT);
+        let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
+        let baseline = t.baseline_for_center(top_cy, ASPECT_BTN_FONT);
         t.draw(
             canvas,
             lx,
             baseline,
             &menu.size_label,
-            LABEL_FONT,
+            ASPECT_BTN_FONT,
+            TEXT_COLOR,
+        );
+        let tw = t.text_width(&menu.aspect_label, ASPECT_BTN_FONT);
+        let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
+        let baseline = t.baseline_for_center(bottom_cy, ASPECT_BTN_FONT);
+        t.draw(
+            canvas,
+            lx,
+            baseline,
+            &menu.aspect_label,
+            ASPECT_BTN_FONT,
             TEXT_COLOR,
         );
     }
@@ -314,10 +303,11 @@ pub fn draw(
             canvas.fill(rect, if selected { BTN_PRESSED } else { BTN_HOVER });
             if let Some(t) = text {
                 let label = aspect_option_label(preset);
-                let tw = t.text_width(&label, ASPECT_FONT);
+                let tw = t.text_width(&label, ASPECT_BTN_FONT);
                 let lx = rect.x0 as f32 + (rect.width() as f32 - tw) / 2.0;
-                let baseline = t.baseline_for_center((rect.y0 + rect.y1) as f32 / 2.0, ASPECT_FONT);
-                t.draw(canvas, lx, baseline, &label, ASPECT_FONT, TEXT_COLOR);
+                let baseline =
+                    t.baseline_for_center((rect.y0 + rect.y1) as f32 / 2.0, ASPECT_BTN_FONT);
+                t.draw(canvas, lx, baseline, &label, ASPECT_BTN_FONT, TEXT_COLOR);
             }
         }
     }
@@ -353,20 +343,23 @@ mod tests {
     }
 
     #[test]
-    fn menu_shows_the_selection_size_as_a_label_above_the_buttons() {
+    fn menu_shows_a_combined_size_and_aspect_button_left_of_the_action_buttons() {
         let m = Menu::layout(
             sel(100, 100, 100 + 1280, 100 + 720),
             full_hd(),
             &test_keys(),
             true,
-            None,
+            Some((16, 9)),
             1.0,
         );
         assert_eq!(m.size_label, "1280 x 720");
-        // The label sits directly above the button row, spanning the same width.
-        assert_eq!(m.label_rect.y1, m.buttons[0].rect.y0);
-        assert_eq!(m.label_rect.x0, m.buttons[0].rect.x0);
-        assert_eq!(m.label_rect.x1, m.buttons[m.buttons.len() - 1].rect.x1);
+        assert_eq!(m.aspect_label, "16:9");
+        // Twice as wide as one action-button square, same height, sitting
+        // directly left of Save.
+        assert_eq!(m.aspect_rect.width(), m.buttons[0].rect.width() * 2);
+        assert_eq!(m.aspect_rect.height(), m.buttons[0].rect.height());
+        assert_eq!(m.aspect_rect.x1, m.buttons[0].rect.x0);
+        assert_eq!(m.aspect_rect.y0, m.buttons[0].rect.y0);
     }
 
     #[test]
@@ -399,23 +392,6 @@ mod tests {
             m.buttons[5].hotkeys,
             vec![LocalKey::new(false, false, false, 'q')]
         );
-    }
-
-    #[test]
-    fn menu_shows_the_aspect_dropdown_above_the_size_label() {
-        let m = Menu::layout(
-            sel(100, 100, 300, 200),
-            full_hd(),
-            &test_keys(),
-            true,
-            Some((16, 9)),
-            1.0,
-        );
-        assert_eq!(m.aspect_label, "Aspect: 16:9");
-        // Sits directly above the size label, spanning the same width.
-        assert_eq!(m.aspect_rect.y1, m.label_rect.y0);
-        assert_eq!(m.aspect_rect.x0, m.label_rect.x0);
-        assert_eq!(m.aspect_rect.x1, m.label_rect.x1);
     }
 
     #[test]
