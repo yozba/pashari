@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn chip_rects_are_same_height_in_order_without_overlap() {
-        let items = [MenuButton::SizeAspect, MenuButton::Save, MenuButton::Quit];
+        let items = [MenuButton::Size, MenuButton::Save, MenuButton::Quit];
         let rects = chip_rects(&items, 720, 0);
         for (_, r) in &rects {
             assert_eq!(r.width(), CHIP_SIZE);

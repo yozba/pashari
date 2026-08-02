@@ -50,13 +50,8 @@ fn action_disabled(action: Action, avail: &MenuAvailability) -> bool {
 
 /// Gap between the selection outline and the menu.
 const MARGIN: usize = 10;
-/// Width of the combined size/aspect-ratio button, in `ACTION_BTN`
-/// squares — wider than the other (single-square) buttons so its two
-/// text lines have room to breathe.
-const ASPECT_BTN_SQUARES: usize = 2;
-/// Font size for the combined button's two stacked lines (size on top,
-/// aspect-ratio state on bottom) and the dropdown's option list — all
-/// the same size.
+/// Font size for the Size button's three stacked lines, the aspect-ratio
+/// button's single line, and the dropdown's option list — all the same size.
 const ASPECT_BTN_FONT: f32 = 15.0;
 /// Height of each row in the open aspect-ratio option list.
 const ASPECT_ROW_H: usize = 22;
@@ -127,11 +122,13 @@ pub struct Button {
 }
 
 /// One `button_order` entry, resolved to what it actually takes to lay
-/// out and draw: either the size/aspect-ratio slot (double-width, its own
-/// draw code), a regular single-width `Action` button, or a layout-only
+/// out and draw: the size display or the aspect-ratio dropdown (each its
+/// own single-square slot with its own draw code, neither a clickable
+/// `Action`), a regular single-width `Action` button, or a layout-only
 /// divider/spacer (same narrow width, neither clickable — a divider draws
 /// a line on a button-colored background, a spacer draws nothing at all).
 enum MenuSlot {
+    Size,
     Aspect,
     Action(Action, &'static str, Vec<LocalKey>),
     Divider,
@@ -142,7 +139,8 @@ enum MenuSlot {
 /// shared with the settings GUI's chips (`store::MenuButton::label`'s doc).
 fn menu_slot(b: MenuButton, keys: &RegionKeys) -> MenuSlot {
     match b {
-        MenuButton::SizeAspect => MenuSlot::Aspect,
+        MenuButton::Size => MenuSlot::Size,
+        MenuButton::AspectRatio => MenuSlot::Aspect,
         MenuButton::Save => MenuSlot::Action(Action::Save, b.label(), keys.menu.save.clone()),
         MenuButton::Copy => MenuSlot::Action(Action::Copy, b.label(), keys.menu.copy.clone()),
         MenuButton::Edit => MenuSlot::Action(Action::Edit, b.label(), keys.menu.edit.clone()),
@@ -170,19 +168,24 @@ fn menu_slot(b: MenuButton, keys: &RegionKeys) -> MenuSlot {
 
 /// A menu built from a caller-supplied, possibly-customized
 /// `button_order` (settings GUI's General tab): a variable number of
-/// single-width action buttons, plus — if included — one double-width
-/// button combining the selection's pixel size and the aspect-ratio
-/// dropdown, wherever it falls in that order. No frame is drawn around
-/// any of them (each stands alone).
+/// single-width slots — action buttons, plus, if included, the size
+/// display and the aspect-ratio dropdown — wherever each falls in that
+/// order. No frame is drawn around any of them (each stands alone).
 #[derive(Clone)]
 pub struct Menu {
     pub buttons: Vec<Button>,
-    /// The selection's size as "W x H", precomputed so `draw` doesn't
-    /// need the selection rect too.
-    pub size_label: String,
+    /// The selection's width in pixels, precomputed so `draw` doesn't
+    /// need the selection rect too. Shown as the Size button's top line.
+    pub size_w_label: String,
+    /// The selection's height in pixels. Shown as the Size button's
+    /// bottom line.
+    pub size_h_label: String,
     /// The aspect-ratio dropdown's current state ("Free", "1:1", ...).
     pub aspect_label: String,
-    /// The combined size/aspect-ratio button's rect, if `button_order`
+    /// The Size button's rect, if `button_order` included it (`None`
+    /// means it's hidden).
+    pub size_rect: Option<Rect>,
+    /// The aspect-ratio dropdown button's rect, if `button_order`
     /// included it (`None` means it's hidden — no button, no dropdown).
     pub aspect_rect: Option<Rect>,
     /// One rect per divider `button_order` included (any number, including
@@ -226,7 +229,6 @@ impl Menu {
     ) -> Self {
         let action_btn = ((ACTION_BTN as f64) * dpi).round() as usize;
         let margin = ((MARGIN as f64) * dpi).round() as usize;
-        let aspect_btn_w = action_btn * ASPECT_BTN_SQUARES;
         let divider_w = (action_btn / DIVIDER_W_DIVISOR).max(DIVIDER_W_MIN);
         // A spacer is exactly as wide as a divider — same footprint,
         // transparent instead of drawing a line.
@@ -236,8 +238,7 @@ impl Menu {
         let panel_w: usize = slots
             .iter()
             .map(|s| match s {
-                MenuSlot::Aspect => aspect_btn_w,
-                MenuSlot::Action(..) => action_btn,
+                MenuSlot::Size | MenuSlot::Aspect | MenuSlot::Action(..) => action_btn,
                 MenuSlot::Divider => divider_w,
                 MenuSlot::Spacer => spacer_w,
             })
@@ -260,20 +261,30 @@ impl Menu {
             bounds.y1.saturating_sub(panel_h).max(bounds.y0)
         };
 
+        let mut size_rect = None;
         let mut aspect_rect = None;
         let mut divider_rects = Vec::new();
         let mut buttons = Vec::with_capacity(slots.len());
         let mut bx = px;
         for slot in slots {
             match slot {
+                MenuSlot::Size => {
+                    size_rect = Some(Rect {
+                        x0: bx,
+                        y0: py,
+                        x1: bx + action_btn,
+                        y1: py + action_btn,
+                    });
+                    bx += action_btn;
+                }
                 MenuSlot::Aspect => {
                     aspect_rect = Some(Rect {
                         x0: bx,
                         y0: py,
-                        x1: bx + aspect_btn_w,
+                        x1: bx + action_btn,
                         y1: py + action_btn,
                     });
-                    bx += aspect_btn_w;
+                    bx += action_btn;
                 }
                 MenuSlot::Action(action, label, hotkeys) => {
                     buttons.push(Button {
@@ -307,8 +318,10 @@ impl Menu {
 
         Self {
             buttons,
-            size_label: format!("{} x {}", sel.width(), sel.height()),
+            size_w_label: sel.width().to_string(),
+            size_h_label: sel.height().to_string(),
             aspect_label: aspect_option_label(aspect_lock),
+            size_rect,
             aspect_rect,
             divider_rects,
             rect: Rect {
@@ -345,29 +358,35 @@ pub fn draw(
     aspect_lock: Option<(u32, u32)>,
     aspect_dropdown_open: bool,
 ) {
-    // The combined size/aspect-ratio button: same square as the other
-    // buttons, with two centered lines (size on top, ratio state below)
-    // instead of an icon+label. `None` means it's hidden (`button_order`
-    // didn't include it) — nothing to draw.
+    // The Size button: same square as the other buttons, with the
+    // selection's width and height stacked on three centered lines
+    // ("1920" / "x" / "1080") instead of an icon+label — the numbers
+    // are self-explanatory, so no icon is needed. `None` means it's
+    // hidden (`button_order` didn't include it) — nothing to draw.
+    if let Some(r) = menu.size_rect {
+        canvas.fill(r, BTN_BG);
+        if let Some(t) = text {
+            let lines = [menu.size_w_label.as_str(), "x", menu.size_h_label.as_str()];
+            let line_h = r.height() as f32 / 3.0;
+            for (i, line) in lines.into_iter().enumerate() {
+                let cy = r.y0 as f32 + line_h * (i as f32 + 0.5);
+                let tw = t.text_width(line, ASPECT_BTN_FONT);
+                let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
+                let baseline = t.baseline_for_center(cy, ASPECT_BTN_FONT);
+                t.draw(canvas, lx, baseline, line, ASPECT_BTN_FONT, TEXT_COLOR);
+            }
+        }
+    }
+
+    // The aspect-ratio dropdown button: same square, a single centered
+    // line showing the current lock state ("Free", "16:9", ...).
     if let Some(r) = menu.aspect_rect {
         canvas.fill(r, BTN_BG);
         if let Some(t) = text {
-            let top_cy = r.y0 as f32 + r.height() as f32 * 0.3;
-            let bottom_cy = r.y0 as f32 + r.height() as f32 * 0.72;
-            let tw = t.text_width(&menu.size_label, ASPECT_BTN_FONT);
-            let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
-            let baseline = t.baseline_for_center(top_cy, ASPECT_BTN_FONT);
-            t.draw(
-                canvas,
-                lx,
-                baseline,
-                &menu.size_label,
-                ASPECT_BTN_FONT,
-                TEXT_COLOR,
-            );
+            let cy = r.y0 as f32 + r.height() as f32 / 2.0;
             let tw = t.text_width(&menu.aspect_label, ASPECT_BTN_FONT);
             let lx = r.x0 as f32 + (r.width() as f32 - tw) / 2.0;
-            let baseline = t.baseline_for_center(bottom_cy, ASPECT_BTN_FONT);
+            let baseline = t.baseline_for_center(cy, ASPECT_BTN_FONT);
             t.draw(
                 canvas,
                 lx,
@@ -491,9 +510,10 @@ mod tests {
 
     /// The menu's original fixed layout (before button customization),
     /// used by tests that assert on a specific 6-action-button shape.
-    fn default_visible_order() -> [MenuButton; 7] {
+    fn default_visible_order() -> [MenuButton; 8] {
         [
-            MenuButton::SizeAspect,
+            MenuButton::Size,
+            MenuButton::AspectRatio,
             MenuButton::Save,
             MenuButton::Copy,
             MenuButton::Edit,
@@ -504,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_shows_a_combined_size_and_aspect_button_left_of_the_action_buttons() {
+    fn menu_shows_separate_size_and_aspect_buttons_left_of_the_action_buttons() {
         let m = Menu::layout(
             sel(100, 100, 100 + 1280, 100 + 720),
             full_hd(),
@@ -514,14 +534,20 @@ mod tests {
             Some((16, 9)),
             1.0,
         );
-        assert_eq!(m.size_label, "1280 x 720");
+        assert_eq!(m.size_w_label, "1280");
+        assert_eq!(m.size_h_label, "720");
         assert_eq!(m.aspect_label, "16:9");
-        // Twice as wide as one action-button square, same height, sitting
-        // directly left of Save.
-        let ar = m.aspect_rect.expect("MenuButton::ALL includes SizeAspect");
-        assert_eq!(ar.width(), m.buttons[0].rect.width() * 2);
+        // Size and aspect are each exactly one action-button square, sitting
+        // adjacent, directly left of Save.
+        let sr = m.size_rect.expect("MenuButton::ALL includes Size");
+        let ar = m.aspect_rect.expect("MenuButton::ALL includes AspectRatio");
+        assert_eq!(sr.width(), m.buttons[0].rect.width());
+        assert_eq!(sr.height(), m.buttons[0].rect.height());
+        assert_eq!(ar.width(), m.buttons[0].rect.width());
         assert_eq!(ar.height(), m.buttons[0].rect.height());
+        assert_eq!(sr.x1, ar.x0);
         assert_eq!(ar.x1, m.buttons[0].rect.x0);
+        assert_eq!(sr.y0, m.buttons[0].rect.y0);
         assert_eq!(ar.y0, m.buttons[0].rect.y0);
     }
 
@@ -542,9 +568,9 @@ mod tests {
 
     #[test]
     fn menu_layout_excludes_hidden_buttons_and_uses_the_given_order() {
-        // Only Quit, Save, then the size/aspect button — in that order,
-        // and skipping Copy/Edit/Upload/Video entirely.
-        let order = [MenuButton::Quit, MenuButton::Save, MenuButton::SizeAspect];
+        // Only Quit, Save, then the aspect-ratio button — in that order,
+        // and skipping Copy/Edit/Upload/Video/Size entirely.
+        let order = [MenuButton::Quit, MenuButton::Save, MenuButton::AspectRatio];
         let m = Menu::layout(
             sel(100, 100, 300, 200),
             full_hd(),
@@ -557,14 +583,15 @@ mod tests {
         assert_eq!(m.buttons.len(), 2);
         assert!(matches!(m.buttons[0].action, Action::Quit));
         assert!(matches!(m.buttons[1].action, Action::Save));
+        assert!(m.size_rect.is_none());
         // The aspect button comes after both action buttons in this order,
         // not pinned to the left.
-        let ar = m.aspect_rect.expect("order includes SizeAspect");
+        let ar = m.aspect_rect.expect("order includes AspectRatio");
         assert_eq!(ar.x0, m.buttons[1].rect.x1);
     }
 
     #[test]
-    fn menu_layout_has_no_aspect_rect_when_size_aspect_is_not_in_the_order() {
+    fn menu_layout_has_no_size_or_aspect_rect_when_neither_is_in_the_order() {
         let order = [MenuButton::Save, MenuButton::Quit];
         let m = Menu::layout(
             sel(100, 100, 300, 200),
@@ -575,13 +602,41 @@ mod tests {
             None,
             1.0,
         );
+        assert!(m.size_rect.is_none());
         assert!(m.aspect_rect.is_none());
         // The panel is exactly 2 action-button squares wide (no room
-        // reserved for the aspect button).
+        // reserved for either).
         assert_eq!(
             m.buttons[1].rect.x1 - m.buttons[0].rect.x0,
             m.buttons[0].rect.width() * 2
         );
+    }
+
+    #[test]
+    fn menu_layout_size_and_aspect_can_appear_independently() {
+        let size_only = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &[MenuButton::Size, MenuButton::Save],
+            &test_availability(),
+            None,
+            1.0,
+        );
+        assert!(size_only.size_rect.is_some());
+        assert!(size_only.aspect_rect.is_none());
+
+        let aspect_only = Menu::layout(
+            sel(100, 100, 300, 200),
+            full_hd(),
+            &test_region_keys(),
+            &[MenuButton::AspectRatio, MenuButton::Save],
+            &test_availability(),
+            None,
+            1.0,
+        );
+        assert!(aspect_only.size_rect.is_none());
+        assert!(aspect_only.aspect_rect.is_some());
     }
 
     #[test]

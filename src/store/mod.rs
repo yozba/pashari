@@ -20,14 +20,16 @@ use std::sync::{LazyLock, Mutex};
 use serde::{Deserialize, Serialize};
 
 /// One of the items the region-selection action menu can show: the
-/// combined size/aspect-ratio button, or one of the region-selection
-/// actions (also usable as hotkeys — see `store::hotkeys::HotkeyConfig`).
-/// Order and membership in `Config::menu_buttons` control the menu's
-/// layout (settings GUI's General tab).
+/// selection-size display, the aspect-ratio-lock dropdown, or one of the
+/// region-selection actions (also usable as hotkeys — see
+/// `store::hotkeys::HotkeyConfig`). Order and membership in
+/// `Config::menu_buttons` control the menu's layout (settings GUI's
+/// General tab).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MenuButton {
-    SizeAspect,
+    Size,
+    AspectRatio,
     Save,
     Copy,
     Edit,
@@ -55,8 +57,9 @@ impl MenuButton {
     /// (used to fill the settings GUI's "available" pool with anything not
     /// in the saved/visible list — see `repeatable` for why `Divider`/
     /// `Spacer` always stay in that pool regardless of how many are shown).
-    pub const ALL: [MenuButton; 15] = [
-        Self::SizeAspect,
+    pub const ALL: [MenuButton; 16] = [
+        Self::Size,
+        Self::AspectRatio,
         Self::Save,
         Self::Copy,
         Self::Edit,
@@ -86,8 +89,9 @@ impl MenuButton {
     /// The default *visible* set — the menu's original fixed layout, before
     /// this customization feature existed. The rest of `ALL` starts in the
     /// "available" pool instead, so a fresh install isn't cluttered.
-    const DEFAULT_VISIBLE: [MenuButton; 7] = [
-        Self::SizeAspect,
+    const DEFAULT_VISIBLE: [MenuButton; 8] = [
+        Self::Size,
+        Self::AspectRatio,
         Self::Save,
         Self::Copy,
         Self::Edit,
@@ -102,7 +106,8 @@ impl MenuButton {
     /// to stay within).
     pub fn label(self) -> &'static str {
         match self {
-            Self::SizeAspect => "Size & Aspect Ratio",
+            Self::Size => "Size",
+            Self::AspectRatio => "Aspect",
             Self::Save => "Save",
             Self::Copy => "Copy",
             Self::Edit => "Edit",
@@ -124,7 +129,8 @@ impl MenuButton {
     /// (de)serializes as, for hand-writing the toml array in `render_toml`.
     fn toml_name(self) -> &'static str {
         match self {
-            Self::SizeAspect => "size_aspect",
+            Self::Size => "size",
+            Self::AspectRatio => "aspect_ratio",
             Self::Save => "save",
             Self::Copy => "copy",
             Self::Edit => "edit",
@@ -595,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_buttons_missing_from_toml_falls_back_to_the_default_seven_button_list() {
+    fn menu_buttons_missing_from_toml_falls_back_to_the_default_button_list() {
         let toml_without_menu_buttons = render_toml(&Config::default())
             .lines()
             .filter(|l| !l.starts_with("menu_buttons"))

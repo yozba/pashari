@@ -2896,7 +2896,7 @@ impl Overlay {
                                     return;
                                 }
                                 // `aspect_rect` is `None` when the
-                                // size/aspect button is hidden via the
+                                // aspect-ratio button is hidden via the
                                 // General tab's menu layout customization.
                                 if let Some(ar) = m.aspect_rect
                                     && cx >= ar.x0
